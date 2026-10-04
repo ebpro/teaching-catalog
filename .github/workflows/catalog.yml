@@ -29,6 +29,6 @@ jobs:
           # NOT auto-create the project, so we create it explicitly first. This is
           # idempotent: on repeat runs wrangler reports the project already exists
           # (non-zero exit), which we treat as OK and continue to the deploy.
-          npx --yes wrangler@4.146.0 pages project create teaching-catalog \
+          npx --yes wrangler@4.146.0 pages project create teaching-catalog --production-branch=main \
             || echo "::warning::pages project create non-zero (project likely already exists); continuing to deploy"
           npx --yes wrangler@4.146.0 pages deploy ./public --project-name="teaching-catalog"
