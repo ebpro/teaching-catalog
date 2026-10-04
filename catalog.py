@@ -167,6 +167,14 @@ def _cf_get(url):
         with urllib.request.urlopen(req, timeout=60) as resp:
             return json.load(resp), resp.status
     except urllib.error.HTTPError as e:
+        if not _cf_other_logged:
+            _cf_other_logged = True
+            try:
+                body = e.read().decode("utf-8", "replace")[:400]
+            except Exception:
+                body = "<unreadable>"
+            sys.stderr.write("CF: HTTP %s (first) on %s: %s\n"
+                             % (e.code, url.split("?")[0], body))
         return None, e.code
     except Exception as e:
         if not _cf_other_logged:
