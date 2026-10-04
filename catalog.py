@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """teaching-catalog generator.
 
-Scans every ``notebook-*`` / ``lecture-*`` repository in the ``ebpro`` GitHub
-org, builds a per-repo git-topology view (last stable tag, current trunk head,
-and every other branch ranked by divergence) and renders a self-contained
-static ``index.html`` plus a machine-readable ``manifest.json`` under
-``./public/``.
+Scans every ``notebook-*`` / ``lecture-*`` / ``sample-*`` / ``demo-*``
+repository in the ``ebpro`` GitHub org, builds a per-repo git-topology view
+(last stable tag, current trunk head, and every other branch ranked by
+divergence) plus per-repo metadata (description, topics, README title) and
+per-ref website links, and renders a self-contained static ``index.html`` plus
+a machine-readable ``manifest.json`` under ``./public/``.
 
 Pure Python 3 stdlib. No third-party dependencies, no network calls other than
 the GitHub REST API, and no threads (all calls are strictly sequential so the
@@ -14,9 +15,11 @@ rate limit is respected).
 Auth: reads the token from the ``GITHUB_TOKEN`` environment variable.
 """
 
+import base64
 import html
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -27,7 +30,7 @@ from datetime import datetime, timezone
 
 ORG = "ebpro"
 # Edit this to change which repos appear in the catalog (name-prefix match).
-PREFIXES = ("notebook-", "lecture-")
+PREFIXES = ("notebook-", "lecture-", "sample-", "demo-")
 API = "https://api.github.com"
 OUT_DIR = "public"
 USER_AGENT = "ebpro-teaching-catalog"
@@ -180,9 +183,60 @@ def fetch_branches(repo):
                            "ahead": comp.get("ahead_by", 0),
                            "behind": comp.get("behind_by", 0)})
     result.sort(key=lambda x: (x["ahead"] is None,
-                               -(x["ahead"] if x["ahead"] is not None else 0),
-                               x["name"]))
+                                -(x["ahead"] if x["ahead"] is not None else 0),
+                                x["name"]))
     return result
+
+
+def fetch_readme_title(repo):
+    """Best-effort first ``# `` markdown heading from the repo's README, or None.
+
+    ``GET /repos/{org}/{repo}/readme?ref={default_branch}`` (Accept:
+    application/vnd.github+json) -> base64-decode ``content`` -> first line
+    matching ``^#\\s+`` -> strip the leading ``# ``. A 404 / missing README / no
+    ``# `` heading all yield None (the subtitle is simply omitted).
+    """
+    name = repo["name"]
+    db = repo["default_branch"]
+    data = _request("%s/repos/%s/%s/readme?ref=%s" % (API, ORG, name, db),
+                    none_on=(404,))
+    if not isinstance(data, dict):
+        return None
+    content = data.get("content")
+    if not content:
+        return None
+    try:
+        if data.get("encoding", "base64") == "base64":
+            text = base64.b64decode(content).decode("utf-8", "replace")
+        else:
+            text = content
+    except Exception:
+        return None
+    for line in text.splitlines():
+        m = re.match(r"^#\s+(.*)$", line)
+        if m:
+            title = m.group(1).strip()
+            return title or None
+    return None
+
+
+def _stable_site(name, tag):
+    """GitHub URL for a tag: /releases/tag/ for release-looking names, else /tags/."""
+    if tag.startswith("v") or tag.startswith("legacy"):
+        return "https://github.com/%s/%s/releases/tag/%s" % (ORG, name, tag)
+    return "https://github.com/%s/%s/tags/%s" % (ORG, name, tag)
+
+
+def site_for_ref(repo_name, ref, cf_previews):
+    """Website URL for a ref, or None.
+
+    ``main`` -> the stable GitHub Pages site (reflects main). Any other ref ->
+    a Cloudflare Pages preview URL (from ``cf_previews``) if one exists, else
+    None.
+    """
+    if ref == "main":
+        return "%s/%s/" % (GITHUB_IO_BASE, repo_name)
+    return cf_previews.get(ref)
 
 
 # --- HTML rendering -------------------------------------------------------
@@ -217,33 +271,52 @@ code { font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospac
 .none { color:var(--muted); }
 ul.features { list-style:none; margin:2px 0 0; padding:0; }
 ul.features li { margin:3px 0; font-size:.85rem; }
-.pill { display:inline-block; background:#fff1e5; color:var(--accent2);
-  border:1px solid #ffd8b3; border-radius:10px; font-size:.68rem; padding:0 6px;
-  margin-left:6px; vertical-align:middle; }
+.title { margin:2px 0 0; font-size:.95rem; color:var(--ink); font-weight:600; }
+.desc { margin:4px 0 0; font-size:.86rem; color:var(--muted); }
+.topics { margin:6px 0 0; }
+.pill { display:inline-block; background:var(--bg); color:var(--ink);
+  border:1px solid var(--line); border-radius:10px; font-size:.7rem; padding:0 7px;
+  margin:0 4px 2px 0; vertical-align:middle; }
+.pill.divergent { background:#fff1e5; color:var(--accent2); border-color:#ffd8b3;
+  margin-left:6px; }
+a.ref { color:var(--accent); text-decoration:none; }
+a.ref:hover { text-decoration:underline; }
+.nosite { color:var(--muted); font-size:.75rem; }
 """
 
 
 def _render_card(name, r):
     esc = html.escape
-    db = r["default_branch"]
     stable = r["stable"]
     trunk = r["trunk"]
     branches = r["branches"]
 
+    # 6. Stable (last tag) -> GitHub tag link
     if stable:
-        stable_html = "<code>%s</code> &rarr; <code>%s</code> &middot; <code>%s</code> &middot; %s" % (
-            esc(stable["tag"]), esc(_short(stable["sha"])),
-            esc(_date10(stable["date"])), esc(stable["subject"]))
+        stable_html = (
+            '<a class="ref" href="%s"><code>%s</code> &rarr; <code>%s</code></a> '
+            '&middot; <code>%s</code> &middot; %s'
+            % (esc(r["stable_site"]), esc(stable["tag"]), esc(_short(stable["sha"])),
+               esc(_date10(stable["date"])), esc(stable["subject"])))
     else:
         stable_html = '<span class="none">&mdash; (no tags)</span>'
 
+    # 7. Trunk (current) -> site link (GitHub Pages for main / CF preview / none)
     if trunk is None:
         trunk_html = '<span class="none">&mdash; (empty repo, no commits)</span>'
     else:
-        trunk_html = "<code>%s</code> &rarr; <code>%s</code> &middot; <code>%s</code> &middot; %s" % (
-            esc(trunk["branch"]), esc(_short(trunk["sha"])),
-            esc(_date10(trunk["date"])), esc(trunk["subject"]))
+        if r.get("trunk_site"):
+            trunk_ref = (
+                '<a class="ref" href="%s"><code>%s</code> &rarr; <code>%s</code></a>'
+                % (esc(r["trunk_site"]), esc(trunk["branch"]), esc(_short(trunk["sha"]))))
+        else:
+            trunk_ref = (
+                '<code>%s</code> &rarr; <code>%s</code> <span class="nosite">no site</span>'
+                % (esc(trunk["branch"]), esc(_short(trunk["sha"]))))
+        trunk_html = "%s &middot; <code>%s</code> &middot; %s" % (
+            trunk_ref, esc(_date10(trunk["date"])), esc(trunk["subject"]))
 
+    # 8. Feature heads -> site link or plain text (no link)
     if branches:
         items = []
         for b in branches:
@@ -252,10 +325,15 @@ def _render_card(name, r):
                 pill = ""
             else:
                 div = " &middot; +%d/&minus;%d vs trunk" % (b["ahead"], b["behind"])
-                pill = ' <span class="pill">divergent</span>' if b["ahead"] > 0 else ""
-            items.append(
-                "<li><code>%s</code> &rarr; <code>%s</code>%s%s</li>"
-                % (esc(b["name"]), esc(_short(b["sha"])), div, pill))
+                pill = ' <span class="pill divergent">divergent</span>' if b["ahead"] > 0 else ""
+            if b.get("site"):
+                ref = (
+                    '<a class="ref" href="%s"><code>%s</code> &rarr; <code>%s</code></a>'
+                    % (esc(b["site"]), esc(b["name"]), esc(_short(b["sha"]))))
+            else:
+                ref = '<code>%s</code> &rarr; <code>%s</code>' % (
+                    esc(b["name"]), esc(_short(b["sha"])))
+            items.append("<li>%s%s%s</li>" % (ref, div, pill))
         features_block = (
             '<div class="row"><span class="label">Feature heads:</span></div>'
             '<ul class="features">%s</ul>' % "".join(items))
@@ -264,12 +342,22 @@ def _render_card(name, r):
             '<div class="row"><span class="label">Feature heads:</span> '
             '<span class="none">&mdash; (none)</span></div>')
 
+    # 1-5. header block
     parts = []
     parts.append('<section class="card">')
     parts.append('  <h2><a href="https://github.com/%s/%s">%s</a></h2>'
                  % (esc(ORG), esc(name), esc(name)))
-    parts.append('  <div class="live"><a href="%s/%s/" target="_blank" rel="noopener">Live site &rarr;</a></div>'
-                 % (esc(GITHUB_IO_BASE), esc(name)))
+    if r.get("readme_title"):
+        parts.append('  <p class="title">%s</p>' % esc(r["readme_title"]))
+    if r.get("description"):
+        parts.append('  <p class="desc">%s</p>' % esc(r["description"]))
+    topics = r.get("topics") or []
+    if topics:
+        parts.append('  <div class="topics">%s</div>' % (
+            "".join('<span class="pill">%s</span>' % esc(t) for t in topics)))
+    parts.append(
+        '  <div class="live"><a href="%s/%s/" target="_blank" rel="noopener">Live site &rarr;</a></div>'
+        % (esc(GITHUB_IO_BASE), esc(name)))
     parts.append('  <div class="row"><span class="label">Stable (last tag):</span> %s</div>'
                  % stable_html)
     parts.append('  <div class="row"><span class="label">Trunk (current):</span> %s</div>'
@@ -285,15 +373,26 @@ def _render_html(manifest):
     generated = esc(manifest["generated_at"])
     count = manifest["count"]
 
-    notebook = sorted(n for n in repos if n.startswith("notebook-"))
-    lecture = sorted(n for n in repos if n.startswith("lecture-"))
-    other = sorted(n for n in repos if n not in notebook and n not in lecture)
+    def _group(prefix):
+        return sorted(n for n in repos if n.startswith(prefix))
+
+    notebook = _group("notebook-")
+    lecture = _group("lecture-")
+    sample = _group("sample-")
+    demo = _group("demo-")
+    other = sorted(n for n in repos
+                   if n not in notebook and n not in lecture
+                   and n not in sample and n not in demo)
 
     groups = []
     if notebook:
         groups.append(("notebooks", notebook))
     if lecture:
         groups.append(("lectures", lecture))
+    if sample:
+        groups.append(("samples", sample))
+    if demo:
+        groups.append(("demos", demo))
     if other:
         groups.append(("other", other))
 
@@ -345,11 +444,26 @@ def main():
     for r in kept:
         name = r["name"]
         sys.stderr.write("Processing %s ...\n" % name)
+        # CF Pages preview lookup (added in a follow-up commit; requires
+        # CF_API_TOKEN). Locally this is always {} -> non-main refs show no link.
+        cf_previews = {}
+        stable = fetch_stable(r)
+        trunk = fetch_trunk(r)
+        branches = fetch_branches(r)
+        stable_site = _stable_site(name, stable["tag"]) if stable else None
+        trunk_site = site_for_ref(name, r["default_branch"], cf_previews) if trunk else None
+        for b in branches:
+            b["site"] = site_for_ref(name, b["name"], cf_previews)
         data[name] = {
             "default_branch": r["default_branch"],
-            "stable": fetch_stable(r),
-            "trunk": fetch_trunk(r),
-            "branches": fetch_branches(r),
+            "readme_title": fetch_readme_title(r),
+            "description": r.get("description"),
+            "topics": r.get("topics") or [],
+            "stable": stable,
+            "stable_site": stable_site,
+            "trunk": trunk,
+            "trunk_site": trunk_site,
+            "branches": branches,
         }
 
     manifest = {
