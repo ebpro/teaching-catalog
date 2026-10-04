@@ -18,6 +18,7 @@ jobs:
       - name: Generate catalog
         env:
           GITHUB_TOKEN: ${{ secrets.EBPRO_CI_PAT || secrets.GITHUB_TOKEN }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: python catalog.py
       - name: Deploy to Cloudflare Pages (production)
         env:

@@ -8,11 +8,13 @@ divergence) plus per-repo metadata (description, topics, README title) and
 per-ref website links, and renders a self-contained static ``index.html`` plus
 a machine-readable ``manifest.json`` under ``./public/``.
 
-Pure Python 3 stdlib. No third-party dependencies, no network calls other than
-the GitHub REST API, and no threads (all calls are strictly sequential so the
-rate limit is respected).
+Pure Python 3 stdlib. No third-party dependencies. Network calls are the GitHub
+REST API (always) and, when ``CF_API_TOKEN`` is set, the Cloudflare Pages API
+(best-effort: a CF failure never breaks the catalog). No threads (all calls are
+strictly sequential so the rate limit is respected).
 
-Auth: reads the token from the ``GITHUB_TOKEN`` environment variable.
+Auth: reads ``GITHUB_TOKEN`` (required) and ``CF_API_TOKEN`` (optional) from the
+environment.
 """
 
 import base64
@@ -102,6 +104,87 @@ def list_repos():
             break
         page += 1
     return repos
+
+
+# --- Cloudflare Pages API layer (best-effort; never raises) ---------------
+#
+# Used only when CF_API_TOKEN is set (i.e. in CI). Locally the token is empty
+# and no CF calls are made (all non-main refs render with no link). Every CF
+# failure is swallowed -> cf_previews = {} so a Cloudflare problem can never
+# break the (GitHub-backed) catalog.
+
+CF_TOKEN = ""
+CF_API = "https://api.cloudflare.com/client/v4"
+_cf_call_count = 0
+_cf_account_id = None
+_cf_account_fetched = False
+
+
+def _cf_get(url):
+    """GET a Cloudflare API url. Returns the parsed JSON body, or None on ANY
+    failure (network, 404, 403, ...). Never raises."""
+    global _cf_call_count
+    _cf_call_count += 1
+    req = urllib.request.Request(url, headers={
+        "Authorization": "Bearer " + CF_TOKEN,
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.load(resp)
+    except Exception:
+        return None
+
+
+def cf_account_id():
+    """Fetch the Cloudflare account id ONCE (cached). None on any failure."""
+    global _cf_account_id, _cf_account_fetched
+    if _cf_account_fetched:
+        return _cf_account_id
+    _cf_account_fetched = True
+    if not CF_TOKEN:
+        return None  # no token -> no CF at all (guarantees zero CF calls)
+    data = _cf_get(CF_API + "/accounts")
+    try:
+        if isinstance(data, dict) and data.get("success") and data.get("result"):
+            _cf_account_id = data["result"][0]["id"]
+        else:
+            _cf_account_id = None
+    except Exception:
+        _cf_account_id = None
+    return _cf_account_id
+
+
+def cf_previews_for(name):
+    """Map of {branch: preview_url} for the repo's CF Pages project.
+
+    Project name = repo basename lowercased with '_' -> '-'. Keeps the most
+    recent (max created_on) preview url per branch. 404 / any error -> {}.
+    """
+    acct = cf_account_id()
+    if not acct:
+        return {}
+    project = name.lower().replace("_", "-")
+    url = "%s/accounts/%s/pages/projects/%s/deployments?per_page=100" % (
+        CF_API, acct, project)
+    data = _cf_get(url)
+    if not (isinstance(data, dict) and data.get("success")
+            and isinstance(data.get("result"), list)):
+        return {}
+    latest = {}
+    for d in data["result"]:
+        if d.get("environment") != "preview":
+            continue
+        branch = d.get("branch")
+        du = d.get("url")
+        created = d.get("created_on", "")
+        if not branch or not du:
+            continue
+        cur = latest.get(branch)
+        if cur is None or created > cur[1]:
+            latest[branch] = (du, created)
+    return {b: u for b, (u, _) in latest.items()}
 
 
 # --- per-repo topology ----------------------------------------------------
@@ -429,11 +512,12 @@ def _render_html(manifest):
 # --- entry point ----------------------------------------------------------
 
 def main():
-    global TOKEN
+    global TOKEN, CF_TOKEN
     TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
     if not TOKEN:
         sys.stderr.write("ERROR: GITHUB_TOKEN environment variable is empty\n")
         return 1
+    CF_TOKEN = os.environ.get("CF_API_TOKEN", "").strip()
 
     repos = list_repos()
     kept = [r for r in repos
@@ -444,9 +528,9 @@ def main():
     for r in kept:
         name = r["name"]
         sys.stderr.write("Processing %s ...\n" % name)
-        # CF Pages preview lookup (added in a follow-up commit; requires
-        # CF_API_TOKEN). Locally this is always {} -> non-main refs show no link.
-        cf_previews = {}
+        # CF Pages preview lookup: {} locally (no CF_API_TOKEN) -> non-main
+        # refs show no link; in CI it maps branch -> preview url.
+        cf_previews = cf_previews_for(name) if CF_TOKEN else {}
         stable = fetch_stable(r)
         trunk = fetch_trunk(r)
         branches = fetch_branches(r)
@@ -465,6 +549,13 @@ def main():
             "trunk_site": trunk_site,
             "branches": branches,
         }
+
+    if CF_TOKEN:
+        total_previews = sum(
+            len([b for b in r["branches"] if b.get("site")]) for r in data.values())
+        sys.stderr.write(
+            "CF: account=%s | cf_api_calls=%d | feature_branches_with_preview=%d\n"
+            % ((cf_account_id() or "NONE"), _cf_call_count, total_previews))
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -485,6 +576,8 @@ def main():
         "Wrote %s/index.html and %s/manifest.json (%d repos)\n"
         % (OUT_DIR, OUT_DIR, len(data)))
     print("Total GitHub API requests: %d" % _call_count)
+    if CF_TOKEN:
+        print("Total Cloudflare API requests: %d" % _cf_call_count)
     return 0
 
 
