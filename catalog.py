@@ -150,6 +150,7 @@ _cf_proj_auth = 0
 _cf_proj_other = 0
 _cf_other_logged = False
 _cf_other_body_logged = False
+_cf_found_body_logged = False
 
 
 def _cf_get(url):
@@ -247,8 +248,17 @@ def cf_previews_for(name):
                     "CF: other (status %s) project=%s | %s\n"
                     % (status, project, detail))
         return {}
-    global _cf_proj_found
+    global _cf_proj_found, _cf_found_body_logged
     _cf_proj_found += 1
+    if not _cf_found_body_logged:
+        _cf_found_body_logged = True
+        envs = {}
+        for d in data["result"]:
+            env = d.get("environment")
+            envs[env] = envs.get(env, 0) + 1
+        sys.stderr.write(
+            "CF: first found project=%s deployments=%d environments=%r\n"
+            % (project, len(data["result"]), envs))
     latest = {}
     for d in data["result"]:
         if d.get("environment") != "preview":
