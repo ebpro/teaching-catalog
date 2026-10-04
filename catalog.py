@@ -217,7 +217,10 @@ def cf_previews_for(name):
     if not acct:
         return {}
     project = name.lower().replace("_", "-")
-    url = "%s/accounts/%s/pages/projects/%s/deployments?per_page=100" % (
+    # per_page must be <= 20 for this endpoint: per_page=100 is rejected with
+    # HTTP 400 / error 8000024 ("Invalid list options ... per_page"). 20 is
+    # the documented default and is ample for the latest preview per branch.
+    url = "%s/accounts/%s/pages/projects/%s/deployments?per_page=20" % (
         CF_API, acct, project)
     data, status = _cf_get(url)
     if not (isinstance(data, dict) and data.get("success")
