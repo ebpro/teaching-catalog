@@ -148,13 +148,14 @@ _cf_proj_found = 0
 _cf_proj_404 = 0
 _cf_proj_auth = 0
 _cf_proj_other = 0
+_cf_other_logged = False
 
 
 def _cf_get(url):
     """GET a Cloudflare API url. Returns a (body, status) tuple:
     (parsed_json, 200) on success; (None, http_code) on an HTTP error;
     (None, -1) on any other failure (network, timeout, ...). Never raises."""
-    global _cf_call_count
+    global _cf_call_count, _cf_other_logged
     _cf_call_count += 1
     req = urllib.request.Request(url, headers={
         "Authorization": "Bearer " + CF_TOKEN,
@@ -166,7 +167,11 @@ def _cf_get(url):
             return json.load(resp), resp.status
     except urllib.error.HTTPError as e:
         return None, e.code
-    except Exception:
+    except Exception as e:
+        if not _cf_other_logged:
+            _cf_other_logged = True
+            sys.stderr.write("CF: non-HTTP error (first) on %s: %r\n"
+                             % (url.split("?")[0], e))
         return None, -1
 
 
