@@ -139,11 +139,21 @@ CF_API = "https://api.cloudflare.com/client/v4"
 _cf_call_count = 0
 _cf_account_id = None
 _cf_account_fetched = False
+_cf_accounts_status = None
+# Per-project deployment-lookup outcome counters (for a self-diagnosing
+# summary): a 200 means the project exists; 404 means no CF Pages project for
+# that repo; 401/403 means the token lacks permission to read it (a scope
+# issue that must be reported, not silently swallowed).
+_cf_proj_found = 0
+_cf_proj_404 = 0
+_cf_proj_auth = 0
+_cf_proj_other = 0
 
 
 def _cf_get(url):
-    """GET a Cloudflare API url. Returns the parsed JSON body, or None on ANY
-    failure (network, 404, 403, ...). Never raises."""
+    """GET a Cloudflare API url. Returns a (body, status) tuple:
+    (parsed_json, 200) on success; (None, http_code) on an HTTP error;
+    (None, -1) on any other failure (network, timeout, ...). Never raises."""
     global _cf_call_count
     _cf_call_count += 1
     req = urllib.request.Request(url, headers={
@@ -153,20 +163,23 @@ def _cf_get(url):
     })
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.load(resp)
+            return json.load(resp), resp.status
+    except urllib.error.HTTPError as e:
+        return None, e.code
     except Exception:
-        return None
+        return None, -1
 
 
 def cf_account_id():
     """Fetch the Cloudflare account id ONCE (cached). None on any failure."""
-    global _cf_account_id, _cf_account_fetched
+    global _cf_account_id, _cf_account_fetched, _cf_accounts_status
     if _cf_account_fetched:
         return _cf_account_id
     _cf_account_fetched = True
     if not CF_TOKEN:
         return None  # no token -> no CF at all (guarantees zero CF calls)
-    data = _cf_get(CF_API + "/accounts")
+    data, status = _cf_get(CF_API + "/accounts")
+    _cf_accounts_status = status
     try:
         if isinstance(data, dict) and data.get("success") and data.get("result"):
             _cf_account_id = data["result"][0]["id"]
@@ -174,6 +187,9 @@ def cf_account_id():
             _cf_account_id = None
     except Exception:
         _cf_account_id = None
+    if not _cf_account_id:
+        sys.stderr.write("CF: /accounts -> HTTP %s (no account resolved; "
+                         "token auth/scope problem?)\n" % status)
     return _cf_account_id
 
 
@@ -189,10 +205,22 @@ def cf_previews_for(name):
     project = name.lower().replace("_", "-")
     url = "%s/accounts/%s/pages/projects/%s/deployments?per_page=100" % (
         CF_API, acct, project)
-    data = _cf_get(url)
+    data, status = _cf_get(url)
     if not (isinstance(data, dict) and data.get("success")
             and isinstance(data.get("result"), list)):
+        # Categorize the failure so the run log is self-diagnosing.
+        if status == 404:
+            global _cf_proj_404
+            _cf_proj_404 += 1
+        elif status in (401, 403):
+            global _cf_proj_auth
+            _cf_proj_auth += 1
+        else:
+            global _cf_proj_other
+            _cf_proj_other += 1
         return {}
+    global _cf_proj_found
+    _cf_proj_found += 1
     latest = {}
     for d in data["result"]:
         if d.get("environment") != "preview":
@@ -580,8 +608,12 @@ def main():
         total_previews = sum(
             len([b for b in r["branches"] if b.get("site")]) for r in data.values())
         sys.stderr.write(
-            "CF: account=%s | cf_api_calls=%d | feature_branches_with_preview=%d\n"
-            % ((cf_account_id() or "NONE"), _cf_call_count, total_previews))
+            "CF: account=%s (accounts HTTP %s) | cf_api_calls=%d | "
+            "projects: found=%d not_found_404=%d auth_err_401_403=%d other_err=%d "
+            "| branches_with_site=%d\n"
+            % ((cf_account_id() or "NONE"), _cf_accounts_status, _cf_call_count,
+               _cf_proj_found, _cf_proj_404, _cf_proj_auth, _cf_proj_other,
+               total_previews))
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
