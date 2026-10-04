@@ -406,6 +406,21 @@ def _ref_href(name, ref, is_tag, cf_previews):
     return "https://github.com/%s/%s/tree/%s" % (ORG, name, ref)
 
 
+def _ref_link(name, ref, is_tag, cf_previews):
+    """Build an ``<a>`` tag for a branch/tag ref.
+
+    Appends a small eye icon when the URL is a Cloudflare Pages preview,
+    so users can visually distinguish preview links from GitHub links.
+    """
+    href = _ref_href(name, ref, is_tag, cf_previews)
+    is_cf = (not is_tag) and (ref in cf_previews)
+    title = ' title="CF Pages preview"' if is_cf else ""
+    icon = EYE_SVG if is_cf else ""
+    return ('<a class="ref-link" href="%s" target="_blank" rel="noopener"%s>'
+            '<code>%s</code>%s</a>'
+            % (html.escape(href), title, html.escape(ref), icon))
+
+
 # --- HTML rendering -------------------------------------------------------
 
 GITHUB_SVG = (
@@ -429,6 +444,16 @@ GLOBE_SVG = (
     '-1.5 5.7zM2.1 9h2.9c.1 1.9.5 3.8 1 5.2A6.5 6.5 0 012.1 9zm4.8 0h2a13.6'
     ' 13.6 0 00-1-5.2 6.5 6.5 0 01-1 5.2zM9 1.8a6.5 6.5 0 014.4 5.2H11a15.3'
     ' 15.3 0 00-1.5-5.2z"/></svg>'
+)
+
+EYE_SVG = (
+    '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" '
+    'aria-hidden="true" style="vertical-align:middle;margin-left:3px;opacity:.7">'
+    '<path d="M8 2c2.21 0 4.21 1.005 5.657 2.414A10.77 10.77 0 0116 8c0 '
+    '1.003-.797 2.354-2.343 3.586C12.21 13.995 10.21 15 8 15s-4.21-1.005'
+    '-5.657-2.414A10.77 10.77 0 010 8c0-1.003.797-2.354 2.343-3.586C3.79 '
+    '3.005 5.79 2 8 2zm0 4a2 2 0 100 4 2 2 0 000-4zm0 1a1 1 0 110 2 1 1 0 '
+    '010-2z"/></svg>'
 )
 
 CSS = """
@@ -599,12 +624,10 @@ def _render_card(name, r):
 
     # Stable: latest tag name or em-dash
     if stable:
-        stable_href = _ref_href(name, stable["tag"], True, cf_previews)
         parts.append(
             '    <div class="row"><span class="label">Stable:</span> '
-            '<a class="ref-link" href="%s" target="_blank" rel="noopener">'
-            '<code>%s</code></a></div>'
-            % (esc(stable_href), esc(stable["tag"])))
+            '%s</div>'
+            % _ref_link(name, stable["tag"], True, cf_previews))
     else:
         parts.append(
             '    <div class="row"><span class="label">Stable:</span> '
@@ -612,12 +635,10 @@ def _render_card(name, r):
 
     # Latest: default branch @ short-sha . date
     if trunk:
-        latest_href = _ref_href(name, trunk["branch"], False, cf_previews)
         parts.append(
             '    <div class="row"><span class="label">Latest:</span> '
-            '<a class="ref-link" href="%s" target="_blank" rel="noopener">'
-            '<code>%s</code></a> @ <code>%s</code> &middot; %s</div>'
-            % (esc(latest_href), esc(trunk["branch"]),
+            '%s @ <code>%s</code> &middot; %s</div>'
+            % (_ref_link(name, trunk["branch"], False, cf_previews),
                esc(_short(trunk["sha"])),
                esc(_date10(trunk["date"]))))
     else:
@@ -629,9 +650,7 @@ def _render_card(name, r):
     feature_branches = [b for b in branches if b != "gh-pages"]
     if feature_branches:
         links = ", ".join(
-            '<a class="ref-link" href="%s" target="_blank" rel="noopener">'
-            '<code>%s</code></a>'
-            % (esc(_ref_href(name, b, False, cf_previews)), esc(b))
+            _ref_link(name, b, False, cf_previews)
             for b in feature_branches)
         parts.append(
             '    <div class="row"><span class="label">Features:</span> %s'
@@ -643,12 +662,15 @@ def _render_card(name, r):
 
     parts.append('  </div>')
 
-    # Live site link (smart: GH Pages if main, CF preview / GitHub otherwise)
-    live_url = r.get("live_site_url")
-    if live_url:
-        parts.append(
-            '  <div class="live"><a href="%s" target="_blank" '
-            'rel="noopener">Live site &rarr;</a></div>' % esc(live_url))
+    # Live site link: only for non-rendered repos (samples/demos).
+    # Rendered repos (lecture-*/notebook-*) already have the title link
+    # pointing to the live site.
+    if not rendered:
+        live_url = r.get("live_site_url")
+        if live_url:
+            parts.append(
+                '  <div class="live"><a href="%s" target="_blank" '
+                'rel="noopener">Live site &rarr;</a></div>' % esc(live_url))
 
     parts.append('</section>')
     return "\n".join(parts)
