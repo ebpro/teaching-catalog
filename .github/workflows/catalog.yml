@@ -25,4 +25,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "::error::CF_API_TOKEN secret not set"; exit 1; fi
+          # Ensure the Pages project exists. wrangler 4.146.0 'pages deploy' does
+          # NOT auto-create the project, so we create it explicitly first. This is
+          # idempotent: on repeat runs wrangler reports the project already exists
+          # (non-zero exit), which we treat as OK and continue to the deploy.
+          npx --yes wrangler@4.146.0 pages project create teaching-catalog \
+            || echo "::warning::pages project create non-zero (project likely already exists); continuing to deploy"
           npx --yes wrangler@4.146.0 pages deploy ./public --project-name="teaching-catalog"
