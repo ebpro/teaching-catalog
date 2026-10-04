@@ -149,6 +149,7 @@ _cf_proj_404 = 0
 _cf_proj_auth = 0
 _cf_proj_other = 0
 _cf_other_logged = False
+_cf_other_body_logged = False
 
 
 def _cf_get(url):
@@ -221,8 +222,19 @@ def cf_previews_for(name):
             global _cf_proj_auth
             _cf_proj_auth += 1
         else:
-            global _cf_proj_other
+            global _cf_proj_other, _cf_other_body_logged
             _cf_proj_other += 1
+            if not _cf_other_body_logged:
+                _cf_other_body_logged = True
+                if isinstance(data, dict):
+                    detail = "success=%r errors=%r result_type=%s" % (
+                        data.get("success"), data.get("errors"),
+                        type(data.get("result")).__name__)
+                else:
+                    detail = repr(data)[:400]
+                sys.stderr.write(
+                    "CF: other (status %s) project=%s | %s\n"
+                    % (status, project, detail))
         return {}
     global _cf_proj_found
     _cf_proj_found += 1
