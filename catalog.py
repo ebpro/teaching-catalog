@@ -391,6 +391,21 @@ def live_site_url(name, default_branch, cf_previews):
     return "https://github.com/%s/%s" % (ORG, name)
 
 
+def _ref_href(name, ref, is_tag, cf_previews):
+    """URL for a branch/tag ref link.
+
+    - lecture-*/notebook-*: CF Pages preview URL if available, else GitHub.
+    - sample-*/demo-*: always GitHub.
+    """
+    if _is_rendered(name):
+        cf_url = cf_previews.get(ref)
+        if cf_url:
+            return cf_url
+    if is_tag:
+        return "https://github.com/%s/%s/releases/tag/%s" % (ORG, name, ref)
+    return "https://github.com/%s/%s/tree/%s" % (ORG, name, ref)
+
+
 # --- HTML rendering -------------------------------------------------------
 
 GITHUB_SVG = (
@@ -476,6 +491,8 @@ h1 { font-size: 1.6rem; margin: 0 0 8px; }
 code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
   monospace; font-size: .85em; background: var(--bg); border-radius: 4px;
   padding: 0 4px; }
+.ref-link { color: var(--accent); text-decoration: none; }
+.ref-link:hover { text-decoration: underline; }
 .none { color: var(--muted); }
 
 .live { margin-top: 8px; font-size: .8rem; }
@@ -521,6 +538,11 @@ def _tab_for(name):
     return "other"
 
 
+def _is_rendered(name):
+    """True for lecture-* / notebook-* repos (have a rendered Quarto site)."""
+    return name.startswith("lecture-") or name.startswith("notebook-")
+
+
 def _render_card(name, r):
     """Render a single repo card as an HTML string."""
     esc = html.escape
@@ -532,23 +554,30 @@ def _render_card(name, r):
     title = r.get("readme_title") or name
     gh_url = "https://github.com/%s/%s" % (ORG, name)
     pages_url = "%s/%s/" % (GITHUB_IO_BASE, name)
+    rendered = _is_rendered(name)
+    cf_previews = r.get("cf_previews") or {}
 
     parts = []
     parts.append('<section class="%s">' % card_cls)
 
     # Header: title + icon links
+    # Title links to the rendered site for lectures/notebooks, GitHub for others.
+    title_href = pages_url if rendered else gh_url
     parts.append('  <h2>')
     parts.append('    <a class="title-link" href="%s">%s</a>'
-                 % (esc(gh_url), esc(title)))
+                 % (esc(title_href), esc(title)))
     parts.append('    <span class="icon-links">')
     parts.append(
         '      <a class="icon-link" href="%s" target="_blank" '
         'rel="noopener" title="GitHub">%s</a>'
         % (esc(gh_url), GITHUB_SVG))
-    parts.append(
-        '      <a class="icon-link" href="%s" target="_blank" '
-        'rel="noopener" title="Live site">%s</a>'
-        % (esc(pages_url), GLOBE_SVG))
+    # Globe icon only for non-rendered types; rendered repos' title already
+    # links to the live site, so the globe would be redundant.
+    if not rendered:
+        parts.append(
+            '      <a class="icon-link" href="%s" target="_blank" '
+            'rel="noopener" title="Live site">%s</a>'
+            % (esc(pages_url), GLOBE_SVG))
     parts.append('    </span>')
     parts.append('  </h2>')
 
@@ -570,9 +599,12 @@ def _render_card(name, r):
 
     # Stable: latest tag name or em-dash
     if stable:
+        stable_href = _ref_href(name, stable["tag"], True, cf_previews)
         parts.append(
             '    <div class="row"><span class="label">Stable:</span> '
-            '<code>%s</code></div>' % esc(stable["tag"]))
+            '<a class="ref-link" href="%s" target="_blank" rel="noopener">'
+            '<code>%s</code></a></div>'
+            % (esc(stable_href), esc(stable["tag"])))
     else:
         parts.append(
             '    <div class="row"><span class="label">Stable:</span> '
@@ -580,10 +612,13 @@ def _render_card(name, r):
 
     # Latest: default branch @ short-sha . date
     if trunk:
+        latest_href = _ref_href(name, trunk["branch"], False, cf_previews)
         parts.append(
             '    <div class="row"><span class="label">Latest:</span> '
-            '<code>%s</code> @ <code>%s</code> &middot; %s</div>'
-            % (esc(trunk["branch"]), esc(_short(trunk["sha"])),
+            '<a class="ref-link" href="%s" target="_blank" rel="noopener">'
+            '<code>%s</code></a> @ <code>%s</code> &middot; %s</div>'
+            % (esc(latest_href), esc(trunk["branch"]),
+               esc(_short(trunk["sha"])),
                esc(_date10(trunk["date"]))))
     else:
         parts.append(
@@ -593,11 +628,14 @@ def _render_card(name, r):
     # Features: other branches (exclude gh-pages as it is not a feature)
     feature_branches = [b for b in branches if b != "gh-pages"]
     if feature_branches:
+        links = ", ".join(
+            '<a class="ref-link" href="%s" target="_blank" rel="noopener">'
+            '<code>%s</code></a>'
+            % (esc(_ref_href(name, b, False, cf_previews)), esc(b))
+            for b in feature_branches)
         parts.append(
             '    <div class="row"><span class="label">Features:</span> %s'
-            '</div>'
-            % ", ".join('<code>%s</code>' % esc(b)
-                        for b in feature_branches))
+            '</div>' % links)
     else:
         parts.append(
             '    <div class="row"><span class="label">Features:</span> '
@@ -748,6 +786,7 @@ def main():
             "trunk": trunk,
             "branches": branches,
             "live_site_url": live_url,
+            "cf_previews": cf_previews,
         }
 
     if CF_TOKEN:
