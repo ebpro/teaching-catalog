@@ -42,13 +42,23 @@ GITHUB_IO_BASE = "https://ebpro.github.io"
 
 _call_count = 0
 TOKEN = ""
+# Retry policy for the strict GitHub helper: on a transient failure (HTTP
+# 403/429 rate limit, or a network-level blip such as a DNS/connection error)
+# retry with exponential backoff, up to _MAX_ATTEMPTS total attempts, and only
+# raise if it keeps failing. Best-effort callers (README) wrap this in
+# try/except so they can never crash the run.
+_MAX_ATTEMPTS = 4
+_BACKOFFS = (30, 60, 120)  # seconds before retry 1, 2, 3
+_RETRYABLE_HTTP = (403, 429)
 
 
-def _request(url, none_on=()):
+def _request(url, none_on=(), attempts=_MAX_ATTEMPTS):
     """GET ``url`` and return the parsed JSON body.
 
-    On HTTP 403 or 429, sleep 60s and retry exactly once, then fail loudly
-    (RuntimeError -> non-zero exit). Any other HTTP error fails immediately.
+    Retries with exponential backoff on transient failures (HTTP 403/429 rate
+    limit, or a network-level blip such as a DNS/connection error), up to
+    ``attempts`` total attempts, then raises RuntimeError (non-zero exit).
+    Non-retryable HTTP errors fail immediately.
 
     If an HTTP status code is in ``none_on``, that response is treated as a
     benign "absent" state and None is returned instead of raising. Used for:
@@ -56,9 +66,9 @@ def _request(url, none_on=()):
       - 404 on the compare endpoint (no common ancestor / branch gone)
     """
     global _call_count
-    _call_count += 1
     last_err = None
-    for attempt in (1, 2):
+    for attempt in range(1, attempts + 1):
+        _call_count += 1
         req = urllib.request.Request(url, headers={
             "Authorization": "Bearer " + TOKEN,
             "Accept": "application/vnd.github+json",
@@ -69,12 +79,13 @@ def _request(url, none_on=()):
             with urllib.request.urlopen(req, timeout=60) as resp:
                 return json.load(resp)
         except urllib.error.HTTPError as e:
-            last_err = e
-            if e.code in (403, 429) and attempt == 1:
+            if e.code in _RETRYABLE_HTTP and attempt < attempts:
+                delay = _BACKOFFS[min(attempt - 1, len(_BACKOFFS) - 1)]
                 sys.stderr.write(
-                    "WARN: HTTP %d on %s - sleeping 60s, retrying once\n"
-                    % (e.code, url))
-                time.sleep(60)
+                    "WARN: HTTP %d on %s - sleeping %ds (attempt %d/%d)\n"
+                    % (e.code, url, delay, attempt, attempts))
+                time.sleep(delay)
+                last_err = e
                 continue
             if e.code in none_on:
                 return None
@@ -85,9 +96,19 @@ def _request(url, none_on=()):
                 pass
             raise RuntimeError(
                 "HTTP %d for %s: %s" % (e.code, url, body[:500]))
-        except Exception as e:
-            raise RuntimeError("Request failed for %s: %s" % (url, e))
-    raise RuntimeError("Gave up on %s after one retry: %s" % (url, last_err))
+        except (urllib.error.URLError, OSError) as e:
+            # Transient network-level failure (DNS blip, connection reset,
+            # timeout): back off and retry, like a rate limit.
+            last_err = e
+            if attempt < attempts:
+                delay = _BACKOFFS[min(attempt - 1, len(_BACKOFFS) - 1)]
+                sys.stderr.write(
+                    "WARN: network error on %s (%s) - sleeping %ds "
+                    "(attempt %d/%d)\n" % (url, e, delay, attempt, attempts))
+                time.sleep(delay)
+                continue
+    raise RuntimeError("Gave up on %s after %d attempts: %s"
+                       % (url, attempts, last_err))
 
 
 def list_repos():
@@ -281,8 +302,13 @@ def fetch_readme_title(repo):
     """
     name = repo["name"]
     db = repo["default_branch"]
-    data = _request("%s/repos/%s/%s/readme?ref=%s" % (API, ORG, name, db),
-                    none_on=(404,))
+    try:
+        # Best-effort: any failure (any non-200, network blip, empty repo, ...)
+        # -> no title. One quick retry, then give up; never crash the run.
+        data = _request("%s/repos/%s/%s/readme?ref=%s" % (API, ORG, name, db),
+                        none_on=(404,), attempts=2)
+    except Exception:
+        return None
     if not isinstance(data, dict):
         return None
     content = data.get("content")
@@ -572,12 +598,17 @@ def main():
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
         f.write(_render_html(manifest))
 
+    readme_missing = sum(1 for r in data.values() if not r.get("readme_title"))
     sys.stderr.write(
         "Wrote %s/index.html and %s/manifest.json (%d repos)\n"
         % (OUT_DIR, OUT_DIR, len(data)))
     print("Total GitHub API requests: %d" % _call_count)
     if CF_TOKEN:
         print("Total Cloudflare API requests: %d" % _cf_call_count)
+        print("CF account id: %s" % (cf_account_id() or "NONE"))
+    else:
+        print("CF account id: (no CF token -> no preview lookups)")
+    print("Repos without README title (404/no-heading/skipped): %d" % readme_missing)
     return 0
 
 
