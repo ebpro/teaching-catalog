@@ -2,10 +2,23 @@
 """teaching-catalog generator.
 
 Scans every ``notebook-*`` / ``lecture-*`` / ``sample-*`` / ``demo-*``
-repository in the ``ebpro`` GitHub org, builds a per-repo git-topology view
-plus per-repo metadata (description, topics, README title) and per-ref
-website links, and renders a self-contained static ``index.html`` plus a
-machine-readable ``manifest.json`` under ``./public/``.
+repository in the ``ebpro`` GitHub org and, for each one, assembles a
+consistent, informative card:
+
+  * a type icon (lecture / notebook / sample / demo)
+  * the repo name (linked to GitHub) and its topic badges
+  * the description
+  * a links section with, for every repo:
+      - Stable  -> the GitHub Pages site (when Pages is enabled)
+      - develop -> the latest Cloudflare Pages preview deployment
+      - features-> the Cloudflare Pages preview of every other branch
+      - CI      -> the latest GitHub Actions run
+
+Each Cloudflare Pages link carries the same deployment info the Pages
+dashboard shows: environment, source branch, commit (short sha) and status.
+
+Renders a self-contained static ``index.html`` plus a machine-readable
+``manifest.json`` under ``./public/``.
 
 Pure Python 3 stdlib. No third-party dependencies. Network calls are the GitHub
 REST API (always) and, when ``CF_API_TOKEN`` is set, the Cloudflare Pages API
@@ -134,9 +147,9 @@ def list_repos():
 # --- Cloudflare Pages API layer (best-effort; never raises) ---------------
 #
 # Used only when CF_API_TOKEN is set (i.e. in CI). Locally the token is empty
-# and no CF calls are made (all non-main refs render with no link). Every CF
-# failure is swallowed -> cf_previews = {} so a Cloudflare problem can never
-# break the (GitHub-backed) catalog.
+# and no CF calls are made (branch rows fall back to GitHub links). Every CF
+# failure is swallowed -> cf_deployments = {} so a Cloudflare problem can
+# never break the (GitHub-backed) catalog.
 
 CF_TOKEN = ""
 CF_API = "https://api.cloudflare.com/client/v4"
@@ -208,11 +221,17 @@ def cf_account_id():
     return _cf_account_id
 
 
-def cf_previews_for(name):
-    """Map of {branch: preview_url} for the repo's CF Pages project.
+def cf_deployments_for(name):
+    """Map of ``{branch: deployment}`` for the repo's CF Pages project.
 
-    Project name = repo basename lowercased with '_' -> '-'. Keeps the most
-    recent (max created_on) preview url per branch. 404 / any error -> {}.
+    Project name = repo basename lowercased with ``_`` -> ``-``. For each
+    branch (both ``preview`` and ``production`` environments) keeps the most
+    recent (max ``created_on``) deployment, capturing the fields needed to
+    render the same info the CF Pages dashboard shows:
+
+        url, environment, status, sha, commit_message, created_on
+
+    404 / any error -> ``{}``.
     """
     acct = cf_account_id()
     if not acct:
@@ -220,7 +239,7 @@ def cf_previews_for(name):
     project = name.lower().replace("_", "-")
     # per_page must be <= 20 for this endpoint: per_page=100 is rejected with
     # HTTP 400 / error 8000024. 20 is the documented default and is ample for
-    # the latest preview per branch.
+    # the latest deployment per branch.
     url = "%s/accounts/%s/pages/projects/%s/deployments?per_page=20" % (
         CF_API, acct, project)
     data, status = _cf_get(url)
@@ -261,17 +280,27 @@ def cf_previews_for(name):
             % (project, len(data["result"]), envs))
     latest = {}
     for d in data["result"]:
-        if d.get("environment") != "preview":
-            continue
         branch = d.get("branch")
         du = d.get("url")
         created = d.get("created_on", "")
         if not branch or not du:
             continue
+        summary = d.get("summary") or {}
+        git_info = summary.get("git_info") or {}
+        dep = {
+            "url": du,
+            "environment": d.get("environment"),
+            # Top-level status ("uploaded"/"in_progress"/"complete"/"error");
+            # fall back to the summary status if the top-level one is absent.
+            "status": d.get("status") or summary.get("status"),
+            "sha": git_info.get("sha") or "",
+            "commit_message": git_info.get("commit_message") or "",
+            "created_on": created,
+        }
         cur = latest.get(branch)
-        if cur is None or created > cur[1]:
-            latest[branch] = (du, created)
-    return {b: u for b, (u, _) in latest.items()}
+        if cur is None or created > cur["created_on"]:
+            latest[branch] = dep
+    return latest
 
 
 # --- per-repo topology ----------------------------------------------------
@@ -291,22 +320,53 @@ def _date10(date):
     return (date or "")[:10]
 
 
-def fetch_stable(repo):
-    """Most-recent tag by committer date, or None if the repo has no tags."""
+def fetch_pages(repo):
+    """GitHub Pages status for the repo, or None if Pages is not enabled.
+
+    ``GET /repos/{org}/{repo}/pages`` -> 200 = enabled (returns ``html_url``
+    + ``status``); 404 = not enabled (None). Any other error -> None.
+    """
     name = repo["name"]
-    tags = _request("%s/repos/%s/%s/tags?per_page=30" % (API, ORG, name))
-    if not tags:
+    try:
+        data = _request("%s/repos/%s/%s/pages" % (API, ORG, name),
+                        none_on=(404,), attempts=2)
+    except Exception:
         return None
-    best = None
-    for t in tags:
-        sha = t["commit"]["sha"]
-        c = _request("%s/repos/%s/%s/commits/%s" % (API, ORG, name, sha))
-        date = c["commit"]["committer"]["date"]
-        subject = _first_line(c["commit"]["message"])
-        if best is None or date > best["date"]:
-            best = {"tag": t["name"], "sha": sha, "date": date,
-                    "subject": subject}
-    return best
+    if not isinstance(data, dict):
+        return None
+    return {
+        "html_url": data.get("html_url")
+        or "%s/%s/" % (GITHUB_IO_BASE, name),
+        "status": data.get("status"),
+    }
+
+
+def fetch_latest_ci(repo):
+    """Most recent GitHub Actions run for the repo, or None if none exists.
+
+    ``GET /repos/{org}/{repo}/actions/runs?per_page=1`` -> first workflow run.
+    Returns ``{status, conclusion, html_url, name, head_sha, head_branch,
+    run_at}`` (each field may be None/"" when absent).
+    """
+    name = repo["name"]
+    try:
+        data = _request("%s/repos/%s/%s/actions/runs?per_page=1"
+                        % (API, ORG, name), attempts=2)
+    except Exception:
+        return None
+    runs = data.get("workflow_runs") if isinstance(data, dict) else None
+    if not runs:
+        return None
+    run = runs[0]
+    return {
+        "status": run.get("status"),
+        "conclusion": run.get("conclusion"),
+        "html_url": run.get("html_url"),
+        "name": run.get("name"),
+        "head_sha": run.get("head_sha"),
+        "head_branch": run.get("head_branch"),
+        "run_at": run.get("run_at"),
+    }
 
 
 def fetch_trunk(repo):
@@ -374,51 +434,108 @@ def fetch_readme_title(repo):
     return None
 
 
-# --- site URL helpers -----------------------------------------------------
+# --- link / deployment helpers -------------------------------------------
 
-def live_site_url(name, default_branch, cf_previews):
-    """Smart 'Live site' URL.
+def _domain(url):
+    """Strip the scheme from a URL for compact display."""
+    if not url:
+        return ""
+    return re.sub(r"^https?://", "", url)
 
-    - default branch is ``main`` -> GitHub Pages (stable site)
-    - default branch is something else -> CF Pages preview if available,
-      otherwise the GitHub repo URL (GH Pages won't serve non-main branches)
+
+def _cf_status_emoji(status):
+    """Map a CF Pages deployment status to a status glyph."""
+    if status == "complete":
+        return "\u2705"          # check mark
+    if status in ("in_progress", "uploaded"):
+        return "\U0001f504"      # cyclic arrows
+    if status == "error":
+        return "\u274c"          # cross mark
+    return "\u2b55"              # white circle
+
+
+def _ci_status_emoji(status, conclusion):
+    """Map a GitHub Actions run (status, conclusion) to a status glyph."""
+    if status == "completed":
+        if conclusion == "success":
+            return "\u2705"
+        if conclusion == "failure":
+            return "\u274c"
+        return "\u26a0\ufe0f"    # warning (cancelled/skipped/neutral/...)
+    if status in ("in_progress", "queued", "pending", "waiting"):
+        return "\U0001f504"
+    return "\u2b55"
+
+
+def _dep_meta(dep):
+    """Inner HTML for a CF deployment meta span: [env] status sha date."""
+    esc = html.escape
+    env = dep.get("environment")
+    parts = []
+    if env:
+        parts.append("[%s]" % esc(env))
+    parts.append(_cf_status_emoji(dep.get("status")))
+    sha = _short(dep.get("sha"))
+    if sha:
+        parts.append(esc(sha))
+    date = _date10(dep.get("created_on"))
+    if date:
+        parts.append(esc(date))
+    return " ".join(parts)
+
+
+def _branch_chip(branch, name, cf_deps):
+    """A single branch link with its CF deployment meta, or a GitHub fallback."""
+    esc = html.escape
+    dep = cf_deps.get(branch)
+    if dep and dep.get("url"):
+        title = ' title="CF Pages %s deployment"' % esc(
+            dep.get("environment") or "preview")
+        chip = ('<span class="chip">'
+                '<a class="ref-link" href="%s" target="_blank" '
+                'rel="noopener"%s><code>%s</code></a>'
+                % (esc(dep["url"]), title, esc(branch)))
+        meta = _dep_meta(dep)
+        if meta:
+            chip += '<span class="dep-meta">%s</span>' % meta
+        chip += "</span>"
+        return chip
+    gh_branch = "https://github.com/%s/%s/tree/%s" % (ORG, name, branch)
+    return ('<span class="chip">'
+            '<a class="ref-link" href="%s" target="_blank" '
+            'rel="noopener"><code>%s</code></a></span>'
+            % (esc(gh_branch), esc(branch)))
+
+
+def _branch_row(label, branch, name, all_branches, cf_deps):
+    """A full link-row for one named branch (e.g. ``develop``).
+
+    Shows the CF Pages preview + deployment meta when available; falls back to
+    a GitHub branch link when the branch exists but has no preview; a dash
+    when the branch does not exist at all.
     """
-    if default_branch == "main":
-        return "%s/%s/" % (GITHUB_IO_BASE, name)
-    cf_url = cf_previews.get(default_branch)
-    if cf_url:
-        return cf_url
-    return "https://github.com/%s/%s" % (ORG, name)
-
-
-def _ref_href(name, ref, is_tag, cf_previews):
-    """URL for a branch/tag ref link.
-
-    - lecture-*/notebook-*: CF Pages preview URL if available, else GitHub.
-    - sample-*/demo-*: always GitHub.
-    """
-    if _is_rendered(name):
-        cf_url = cf_previews.get(ref)
-        if cf_url:
-            return cf_url
-    if is_tag:
-        return "https://github.com/%s/%s/releases/tag/%s" % (ORG, name, ref)
-    return "https://github.com/%s/%s/tree/%s" % (ORG, name, ref)
-
-
-def _ref_link(name, ref, is_tag, cf_previews):
-    """Build an ``<a>`` tag for a branch/tag ref.
-
-    Appends a small eye icon when the URL is a Cloudflare Pages preview,
-    so users can visually distinguish preview links from GitHub links.
-    """
-    href = _ref_href(name, ref, is_tag, cf_previews)
-    is_cf = (not is_tag) and (ref in cf_previews)
-    title = ' title="CF Pages preview"' if is_cf else ""
-    icon = EYE_SVG if is_cf else ""
-    return ('<a class="ref-link" href="%s" target="_blank" rel="noopener"%s>'
-            '<code>%s</code>%s</a>'
-            % (html.escape(href), title, html.escape(ref), icon))
+    esc = html.escape
+    dep = cf_deps.get(branch)
+    if dep and dep.get("url"):
+        title = ' title="CF Pages %s deployment"' % esc(
+            dep.get("environment") or "preview")
+        row = ('    <div class="link-row"><span class="link-label">%s</span> '
+               '<a class="ref-link" href="%s" target="_blank" '
+               'rel="noopener"%s><code>%s</code></a>'
+               % (label, esc(dep["url"]), title, esc(branch)))
+        meta = _dep_meta(dep)
+        if meta:
+            row += ' <span class="dep-meta">%s</span>' % meta
+        row += "</div>"
+        return row
+    if branch in all_branches:
+        gh_branch = "https://github.com/%s/%s/tree/%s" % (ORG, name, branch)
+        return ('    <div class="link-row"><span class="link-label">%s</span> '
+                '<a class="ref-link" href="%s" target="_blank" '
+                'rel="noopener"><code>%s</code></a></div>'
+                % (label, esc(gh_branch), esc(branch)))
+    return ('    <div class="link-row"><span class="link-label">%s</span> '
+            '<span class="none">&mdash;</span></div>' % label)
 
 
 # --- HTML rendering -------------------------------------------------------
@@ -436,25 +553,14 @@ GITHUB_SVG = (
     '.21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>'
 )
 
-GLOBE_SVG = (
-    '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" '
-    'aria-hidden="true"><path d="M8 0a8 8 0 100 16A8 8 0 008 0zm5.9 7h-2.5'
-    'a15.3 15.3 0 00-1-5.2A6.5 6.5 0 0113.9 7zM8 14.5a13.6 13.6 0 01-1-5.5'
-    'h2a13.6 13.6 0 01-1 5.5zm-2-7H3.1A6.5 6.5 0 017.5 1.8a15.3 15.3 0 00'
-    '-1.5 5.7zM2.1 9h2.9c.1 1.9.5 3.8 1 5.2A6.5 6.5 0 012.1 9zm4.8 0h2a13.6'
-    ' 13.6 0 00-1-5.2 6.5 6.5 0 01-1 5.2zM9 1.8a6.5 6.5 0 014.4 5.2H11a15.3'
-    ' 15.3 0 00-1.5-5.2z"/></svg>'
-)
-
-EYE_SVG = (
-    '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" '
-    'aria-hidden="true" style="vertical-align:middle;margin-left:3px;opacity:.7">'
-    '<path d="M8 2c2.21 0 4.21 1.005 5.657 2.414A10.77 10.77 0 0116 8c0 '
-    '1.003-.797 2.354-2.343 3.586C12.21 13.995 10.21 15 8 15s-4.21-1.005'
-    '-5.657-2.414A10.77 10.77 0 010 8c0-1.003.797-2.354 2.343-3.586C3.79 '
-    '3.005 5.79 2 8 2zm0 4a2 2 0 100 4 2 2 0 000-4zm0 1a1 1 0 110 2 1 1 0 '
-    '010-2z"/></svg>'
-)
+# Consistent per-type icons (lectures vs notebooks vs samples vs demos).
+TYPE_ICONS = {
+    "lectures": "\U0001f4d8",    # blue book
+    "notebooks": "\U0001f4d3",   # notebook
+    "samples": "\U0001f9ea",     # test tube
+    "demos": "\U0001f3ac",       # clapper board
+    "other": "\U0001f4c1",       # file folder
+}
 
 CSS = """
 :root {
@@ -503,16 +609,29 @@ h1 { font-size: 1.6rem; margin: 0 0 8px; }
 
 .desc { margin: 4px 0 0; font-size: .86rem; color: var(--muted); }
 .badges { margin: 6px 0 0; }
-.badge { display: inline-block; background: #fff3e0; color: #e65100;
-  border: 1px solid #ffcc80; border-radius: 10px; font-size: .7rem;
-  padding: 0 7px; margin: 0 4px 2px 0; vertical-align: middle;
-  font-weight: 600; }
+.badge { display: inline-block; border: 1px solid; border-radius: 10px;
+  font-size: .7rem; padding: 0 7px; margin: 0 4px 2px 0;
+  vertical-align: middle; font-weight: 600; line-height: 1.7; }
+.badge-area { background: #e7f0fd; color: #0a3069; border-color: #b6d0fe; }
+.badge-status { background: #e6f4ea; color: #1a5632; border-color: #a7d9b8; }
+.badge-status-legacy, .badge-status-stub { background: #f1f2f4;
+  color: #57606a; border-color: #d0d4d9; }
+.badge-status-frozen { background: #fff3e0; color: #9a4a00;
+  border-color: #ffcc80; }
+.badge-status-duplicate { background: #ffebe9; color: #a40e26;
+  border-color: #ffcecb; }
+.badge-fmt { background: #fff3e0; color: #e65100; border-color: #ffcc80; }
+.badge-review { background: #f3e8ff; color: #6b21a8; border-color: #e3c7ff; }
 
-/* Refs */
-.refs { margin-top: 10px; }
-.row { margin: 4px 0; font-size: .88rem; }
-.label { display: inline-block; min-width: 70px; color: var(--muted);
-  font-weight: 600; }
+/* Links section */
+.links { margin-top: 10px; }
+.link-row { margin: 5px 0; font-size: .88rem;
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.link-label { display: inline-block; min-width: 86px; color: var(--muted);
+  font-weight: 600; flex-shrink: 0; }
+.link-items { display: inline-flex; gap: 12px; flex-wrap: wrap; }
+.chip { display: inline-flex; align-items: baseline; gap: 6px; }
+.dep-meta { color: var(--muted); font-size: .76rem; white-space: nowrap; }
 code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
   monospace; font-size: .85em; background: var(--bg); border-radius: 4px;
   padding: 0 4px; }
@@ -520,9 +639,7 @@ code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
 .ref-link:hover { text-decoration: underline; }
 .none { color: var(--muted); }
 
-.live { margin-top: 8px; font-size: .8rem; }
-.live a { color: var(--accent); text-decoration: none; font-weight: 600; }
-.live a:hover { text-decoration: underline; }
+.type-icon { font-size: 1.05rem; line-height: 1; flex-shrink: 0; }
 """
 
 JS = """
@@ -546,10 +663,6 @@ def _is_legacy(topics):
     return "status-legacy" in topics
 
 
-def _has_ipynb(topics):
-    return "fmt-ipynb" in topics
-
-
 def _tab_for(name):
     """Determine which tab a repo belongs to based on its name prefix."""
     if name.startswith("lecture-"):
@@ -563,46 +676,72 @@ def _tab_for(name):
     return "other"
 
 
-def _is_rendered(name):
-    """True for lecture-* / notebook-* repos (have a rendered Quarto site)."""
-    return name.startswith("lecture-") or name.startswith("notebook-")
+def _badges_html(topics):
+    """Render ``area-*`` / ``status-*`` / ``fmt-*`` / ``review`` topics as
+    small colored badges (other topics are ignored)."""
+    out = []
+    for t in topics:
+        if t.startswith("area-"):
+            label, cls = t[len("area-"):], "badge-area"
+        elif t.startswith("status-"):
+            value = t[len("status-"):]
+            label = value
+            cls = "badge-status badge-status-%s" % value
+        elif t.startswith("fmt-"):
+            label = "Jupyter" if t == "fmt-ipynb" else t[len("fmt-"):]
+            cls = "badge-fmt"
+        elif t == "review":
+            label, cls = "review", "badge-review"
+        else:
+            continue
+        out.append('<span class="badge %s">%s</span>'
+                   % (cls, html.escape(label)))
+    return "".join(out)
 
 
 def _render_card(name, r):
-    """Render a single repo card as an HTML string."""
+    """Render a single repo card as an HTML string.
+
+    Layout (consistent for every repo):
+      [type-icon] Name (-> GitHub)        [github icon]
+      description
+      [area badge] [status badge] [fmt badge] [review badge]
+      Links:
+        \U0001f3e0 Stable   -> GitHub Pages site (when enabled)
+        \U0001f33f develop  -> CF Pages preview + [env] status sha date
+        \U0001f331 features -> CF Pages previews of every other branch
+        \u2699\ufe0f CI        -> latest GitHub Actions run + sha branch date
+    """
     esc = html.escape
     topics = r.get("topics") or []
     legacy = _is_legacy(topics)
     card_cls = "card legacy" if legacy else "card"
 
-    # Title: README title if available, otherwise the repo name.
+    tab = _tab_for(name)
+    icon = TYPE_ICONS.get(tab, TYPE_ICONS["other"])
     title = r.get("readme_title") or name
     gh_url = "https://github.com/%s/%s" % (ORG, name)
-    pages_url = "%s/%s/" % (GITHUB_IO_BASE, name)
-    rendered = _is_rendered(name)
-    cf_previews = r.get("cf_previews") or {}
+    db = r.get("default_branch") or "main"
+    cf_deps = r.get("cf_deployments") or {}
+    pages = r.get("pages")
+    ci = r.get("latest_ci")
+    branches = r.get("branches") or []
+    all_branches = set(branches) | {db}
 
     parts = []
     parts.append('<section class="%s">' % card_cls)
 
-    # Header: title + icon links
-    # Title links to the rendered site for lectures/notebooks, GitHub for others.
-    title_href = pages_url if rendered else gh_url
+    # Header: type icon + name (linked to GitHub) + GitHub icon.
     parts.append('  <h2>')
+    parts.append('    <span class="type-icon" aria-hidden="true">%s</span>'
+                 % icon)
     parts.append('    <a class="title-link" href="%s">%s</a>'
-                 % (esc(title_href), esc(title)))
+                 % (esc(gh_url), esc(title)))
     parts.append('    <span class="icon-links">')
     parts.append(
         '      <a class="icon-link" href="%s" target="_blank" '
         'rel="noopener" title="GitHub">%s</a>'
         % (esc(gh_url), GITHUB_SVG))
-    # Globe icon only for non-rendered types; rendered repos' title already
-    # links to the live site, so the globe would be redundant.
-    if not rendered:
-        parts.append(
-            '      <a class="icon-link" href="%s" target="_blank" '
-            'rel="noopener" title="Live site">%s</a>'
-            % (esc(pages_url), GLOBE_SVG))
     parts.append('    </span>')
     parts.append('  </h2>')
 
@@ -610,68 +749,67 @@ def _render_card(name, r):
     if r.get("description"):
         parts.append('  <p class="desc">%s</p>' % esc(r["description"]))
 
-    # Badges (fmt-ipynb -> "Jupyter" badge; no raw topic text)
-    if _has_ipynb(topics):
+    # Topic badges (area / status / fmt / review)
+    badges = _badges_html(topics)
+    if badges:
+        parts.append('  <div class="badges">%s</div>' % badges)
+
+    # Links section
+    parts.append('  <div class="links">')
+
+    # Stable: GitHub Pages (if enabled).
+    parts.append('    <div class="link-row">')
+    parts.append('      <span class="link-label">\U0001f3e0 Stable</span>')
+    if pages:
         parts.append(
-            '  <div class="badges"><span class="badge">Jupyter</span></div>')
-
-    # Refs: Stable / Latest / Features
-    stable = r.get("stable")
-    trunk = r.get("trunk")
-    branches = r.get("branches") or []
-
-    parts.append('  <div class="refs">')
-
-    # Stable: latest tag name or em-dash
-    if stable:
-        parts.append(
-            '    <div class="row"><span class="label">Stable:</span> '
-            '%s</div>'
-            % _ref_link(name, stable["tag"], True, cf_previews))
+            '      <a class="ref-link" href="%s" target="_blank" '
+            'rel="noopener">%s</a>'
+            % (esc(pages["html_url"]), esc(_domain(pages["html_url"]))))
     else:
-        parts.append(
-            '    <div class="row"><span class="label">Stable:</span> '
-            '<span class="none">&mdash;</span></div>')
+        parts.append('      <span class="none">Pages not enabled</span>')
+    parts.append('    </div>')
 
-    # Latest: default branch @ short-sha . date
-    if trunk:
-        parts.append(
-            '    <div class="row"><span class="label">Latest:</span> '
-            '%s @ <code>%s</code> &middot; %s</div>'
-            % (_ref_link(name, trunk["branch"], False, cf_previews),
-               esc(_short(trunk["sha"])),
-               esc(_date10(trunk["date"]))))
-    else:
-        parts.append(
-            '    <div class="row"><span class="label">Latest:</span> '
-            '<span class="none">&mdash; (empty repo)</span></div>')
+    # develop: CF Pages preview (or GitHub branch link / dash).
+    parts.append(_branch_row("\U0001f33f develop", "develop", name,
+                             all_branches, cf_deps))
 
-    # Features: other branches (exclude gh-pages as it is not a feature)
-    feature_branches = [b for b in branches if b != "gh-pages"]
+    # Feature branches: CF Pages previews (or GitHub links).
+    feature_branches = [b for b in sorted(branches)
+                        if b != "gh-pages" and b != db]
     if feature_branches:
-        links = ", ".join(
-            _ref_link(name, b, False, cf_previews)
-            for b in feature_branches)
-        parts.append(
-            '    <div class="row"><span class="label">Features:</span> %s'
-            '</div>' % links)
+        chips = "".join(_branch_chip(b, name, cf_deps)
+                        for b in feature_branches)
+        parts.append('    <div class="link-row">')
+        parts.append('      <span class="link-label">\U0001f331 features</span>')
+        parts.append('      <span class="link-items">%s</span>' % chips)
+        parts.append('    </div>')
     else:
         parts.append(
-            '    <div class="row"><span class="label">Features:</span> '
-            '<span class="none">&mdash;</span></div>')
+            '    <div class="link-row"><span class="link-label">'
+            '\U0001f331 features</span> <span class="none">&mdash;</span>'
+            '</div>')
+
+    # CI: latest GitHub Actions run.
+    parts.append('    <div class="link-row">')
+    parts.append('      <span class="link-label">\u2699\ufe0f CI</span>')
+    if ci and ci.get("html_url"):
+        emoji = _ci_status_emoji(ci.get("status"), ci.get("conclusion"))
+        label = ci.get("name") or "latest run"
+        parts.append(
+            '      <a class="ref-link" href="%s" target="_blank" '
+            'rel="noopener">%s %s</a>'
+            % (esc(ci["html_url"]), emoji, esc(label)))
+        meta_bits = [x for x in (_short(ci.get("head_sha")),
+                                 esc(ci.get("head_branch") or ""),
+                                 esc(_date10(ci.get("run_at")))) if x]
+        if meta_bits:
+            parts.append('      <span class="dep-meta">%s</span>'
+                         % " &middot; ".join(meta_bits))
+    else:
+        parts.append('      <span class="none">&mdash;</span>')
+    parts.append('    </div>')
 
     parts.append('  </div>')
-
-    # Live site link: only for non-rendered repos (samples/demos).
-    # Rendered repos (lecture-*/notebook-*) already have the title link
-    # pointing to the live site.
-    if not rendered:
-        live_url = r.get("live_site_url")
-        if live_url:
-            parts.append(
-                '  <div class="live"><a href="%s" target="_blank" '
-                'rel="noopener">Live site &rarr;</a></div>' % esc(live_url))
-
     parts.append('</section>')
     return "\n".join(parts)
 
@@ -785,30 +923,22 @@ def main():
     for r in kept:
         name = r["name"]
         sys.stderr.write("Processing %s ...\n" % name)
-        # CF Pages preview lookup: {} locally (no CF_API_TOKEN) -> non-main
-        # refs show no CF link; in CI it maps branch -> preview url.
-        cf_previews = cf_previews_for(name) if CF_TOKEN else {}
-        stable = fetch_stable(r)
+        # CF Pages deployments lookup: {} locally (no CF_API_TOKEN); in CI it
+        # maps branch -> {url, environment, status, sha, created_on, ...}.
+        cf_deps = cf_deployments_for(name) if CF_TOKEN else {}
         trunk = fetch_trunk(r)
         branches = fetch_branches(r)
         db = r["default_branch"]
-        # Smart live-site URL: GH Pages if main, CF preview if other branch,
-        # GitHub repo as fallback.
-        if trunk:
-            live_url = live_site_url(name, db, cf_previews)
-        else:
-            # Empty repo: just link to GitHub
-            live_url = "https://github.com/%s/%s" % (ORG, name)
         data[name] = {
             "default_branch": db,
             "readme_title": fetch_readme_title(r),
             "description": r.get("description"),
             "topics": r.get("topics") or [],
-            "stable": stable,
             "trunk": trunk,
             "branches": branches,
-            "live_site_url": live_url,
-            "cf_previews": cf_previews,
+            "pages": fetch_pages(r),
+            "latest_ci": fetch_latest_ci(r),
+            "cf_deployments": cf_deps,
         }
 
     if CF_TOKEN:
