@@ -540,368 +540,410 @@ def _branch_row(label, branch, name, all_branches, cf_deps):
 
 # --- HTML rendering -------------------------------------------------------
 
-GITHUB_SVG = (
-    '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" '
-    'aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 '
-    '5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49'
-    '-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 '
-    '1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78'
-    '-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12'
-    '0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04'
-    '2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07'
-    '-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 '
-    '.21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>'
-)
-
-# Consistent per-type icons (lectures vs notebooks vs samples vs demos).
-TYPE_ICONS = {
-    "lectures": "\U0001f4d8",    # blue book
-    "notebooks": "\U0001f4d3",   # notebook
-    "samples": "\U0001f9ea",     # test tube
-    "demos": "\U0001f3ac",       # clapper board
-    "other": "\U0001f4c1",       # file folder
-}
-
-CSS = """
+DASHBOARD_CSS = """
 :root {
-  --bg: #f6f7f9; --card: #ffffff; --ink: #1f2328; --muted: #6a737d;
-  --line: #e1e4e8; --accent: #0969da; --accent2: #bc4c00;
+  --bg-dark: #1a1a2e;
+  --bg-page: #f0f2f5;
+  --bg-card: #ffffff;
+  --text: #2d3436;
+  --text-muted: #636e72;
+  --accent: #0984e3;
+  --success: #00b894;
+  --error: #d63031;
+  --warning: #fdcb6e;
+  --radius: 12px;
+  --shadow: 0 2px 8px rgba(0,0,0,0.08);
+  --shadow-hover: 0 8px 24px rgba(0,0,0,0.12);
 }
-* { box-sizing: border-box; }
-body { margin: 0; padding: 24px; background: var(--bg); color: var(--ink);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
-  sans-serif; line-height: 1.5; }
-.wrap { max-width: 900px; margin: 0 auto; }
-h1 { font-size: 1.6rem; margin: 0 0 8px; }
-.philosophy { color: var(--ink); font-size: .92rem; line-height: 1.6;
-  margin: 0 0 12px; max-width: 720px; }
-.meta { color: var(--muted); font-size: .85rem; margin-bottom: 20px; }
-.meta a { color: var(--accent); text-decoration: none; }
-.meta a:hover { text-decoration: underline; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif; background: var(--bg-page); color: var(--text); line-height: 1.6; }
 
-/* Tabs */
-.tabs { display: flex; gap: 4px; margin-bottom: 16px;
-  border-bottom: 2px solid var(--line); }
-.tab-btn { background: none; border: none; padding: 8px 16px;
-  font-size: .9rem; font-weight: 600; color: var(--muted); cursor: pointer;
-  border-bottom: 2px solid transparent; margin-bottom: -2px;
-  transition: color .15s, border-color .15s; }
-.tab-btn:hover { color: var(--ink); }
-.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
-.tab-content { display: none; }
-.tab-content.active { display: block; }
+/* Header */
+header { position: sticky; top: 0; z-index: 100; background: var(--bg-dark); color: white; padding: 16px 24px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+header h1 { font-size: 1.3rem; font-weight: 600; }
+header h1 span { opacity: 0.7; font-weight: 400; }
+.search { flex: 1; min-width: 200px; max-width: 400px; padding: 8px 16px; border-radius: 20px; border: none; background: rgba(255,255,255,0.15); color: white; font-size: 0.9rem; }
+.search::placeholder { color: rgba(255,255,255,0.5); }
+.search:focus { outline: none; background: rgba(255,255,255,0.25); }
+.toggle { display: flex; border-radius: 20px; overflow: hidden; border: 1px solid rgba(255,255,255,0.3); }
+.toggle button { padding: 6px 14px; border: none; background: transparent; color: white; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
+.toggle button.active { background: var(--accent); }
 
-/* Cards */
-.card { background: var(--card); border: 1px solid var(--line);
-  border-radius: 8px; padding: 14px 16px; margin-bottom: 12px;
-  transition: opacity .15s; }
-.card.legacy { opacity: .6; }
-.card.legacy:hover { opacity: .85; }
-.card h2 { font-size: 1.05rem; margin: 0 0 2px;
-  display: flex; align-items: center; gap: 8px; }
-.card h2 .title-link { color: var(--ink); text-decoration: none; flex: 1; }
-.card h2 .title-link:hover { color: var(--accent); }
-.icon-links { display: inline-flex; gap: 6px; flex-shrink: 0; }
-.icon-link { color: var(--muted); display: inline-flex;
-  align-items: center; }
-.icon-link:hover { color: var(--accent); }
-.icon-link svg { fill: currentColor; }
+/* Stats bar (teacher) */
+#stats-bar { display: flex; gap: 12px; padding: 12px 24px; background: white; border-bottom: 1px solid #e0e0e0; flex-wrap: wrap; }
+.stat { padding: 4px 12px; border-radius: 16px; font-size: 0.8rem; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+.stat:hover { transform: translateY(-1px); }
+.stat.total { background: #dfe6e9; }
+.stat.green { background: #55efc4; color: #00b894; }
+.stat.red { background: #fab1a0; color: #d63031; }
+.stat.yellow { background: #ffeaa7; color: #fdcb6e; }
+.stat.time { background: #dfe6e9; cursor: default; margin-left: auto; }
 
-.desc { margin: 4px 0 0; font-size: .86rem; color: var(--muted); }
-.badges { margin: 6px 0 0; }
-.badge { display: inline-block; border: 1px solid; border-radius: 10px;
-  font-size: .7rem; padding: 0 7px; margin: 0 4px 2px 0;
-  vertical-align: middle; font-weight: 600; line-height: 1.7; }
-.badge-area { background: #e7f0fd; color: #0a3069; border-color: #b6d0fe; }
-.badge-status { background: #e6f4ea; color: #1a5632; border-color: #a7d9b8; }
-.badge-status-legacy, .badge-status-stub { background: #f1f2f4;
-  color: #57606a; border-color: #d0d4d9; }
-.badge-status-frozen { background: #fff3e0; color: #9a4a00;
-  border-color: #ffcc80; }
-.badge-status-duplicate { background: #ffebe9; color: #a40e26;
-  border-color: #ffcecb; }
-.badge-fmt { background: #fff3e0; color: #e65100; border-color: #ffcc80; }
-.badge-review { background: #f3e8ff; color: #6b21a8; border-color: #e3c7ff; }
+/* Filter chips */
+#filter-chips { display: flex; gap: 8px; padding: 12px 24px; flex-wrap: wrap; }
+.chip { padding: 6px 14px; border-radius: 16px; border: 1px solid #dfe6e9; background: white; font-size: 0.8rem; cursor: pointer; transition: all 0.2s; }
+.chip.active { background: var(--accent); color: white; border-color: var(--accent); }
+.chip:hover { border-color: var(--accent); }
 
-/* Links section */
-.links { margin-top: 10px; }
-.link-row { margin: 5px 0; font-size: .88rem;
-  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.link-label { display: inline-block; min-width: 86px; color: var(--muted);
-  font-weight: 600; flex-shrink: 0; }
-.link-items { display: inline-flex; gap: 12px; flex-wrap: wrap; }
-.chip { display: inline-flex; align-items: baseline; gap: 6px; }
-.dep-meta { color: var(--muted); font-size: .76rem; white-space: nowrap; }
-code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-  monospace; font-size: .85em; background: var(--bg); border-radius: 4px;
-  padding: 0 4px; }
-.ref-link { color: var(--accent); text-decoration: none; }
-.ref-link:hover { text-decoration: underline; }
-.none { color: var(--muted); }
+/* Card grid */
+#content { padding: 0 24px 24px; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
 
-.type-icon { font-size: 1.05rem; line-height: 1; flex-shrink: 0; }
+/* Teacher card */
+.card { background: var(--bg-card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px; transition: all 0.2s; position: relative; }
+.card:hover { box-shadow: var(--shadow-hover); transform: translateY(-2px); }
+.card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.status-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.status-dot.green { background: var(--success); }
+.status-dot.red { background: var(--error); }
+.status-dot.yellow { background: var(--warning); }
+.status-dot.gray { background: #b2bec3; }
+.card-title { font-size: 0.9rem; font-weight: 600; font-family: 'JetBrains Mono', 'Fira Code', monospace; flex: 1; }
+.card-title a { color: var(--text); text-decoration: none; }
+.card-title a:hover { color: var(--accent); }
+.ci-link { font-size: 1.1rem; text-decoration: none; }
+.card-desc { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.badges { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
+.badge { padding: 2px 8px; border-radius: 10px; font-size: 0.7rem; font-weight: 500; }
+.badge.area { background: #74b9ff; color: white; }
+.badge.status-active { background: #55efc4; color: #00695c; }
+.badge.status-frozen { background: #fab1a0; color: #d63031; }
+.badge.status-legacy { background: #dfe6e9; color: #636e72; }
+.badge.topic { background: #f0f0f0; color: #636e72; }
+.card-links { display: flex; gap: 12px; padding-top: 12px; border-top: 1px solid #f0f0f0; font-size: 0.8rem; }
+.card-links a { color: var(--accent); text-decoration: none; }
+.card-links a:hover { text-decoration: underline; }
+.card-footer { margin-top: 8px; font-size: 0.75rem; color: var(--text-muted); }
+
+/* Student card */
+.card.student { padding: 28px; text-align: center; }
+.card.student .type-icon { font-size: 2.5rem; margin-bottom: 12px; }
+.card.student .card-title { font-size: 1.1rem; font-family: inherit; font-weight: 600; }
+.card.student .card-desc { -webkit-line-clamp: 3; }
+.cta-btn { display: inline-block; margin-top: 16px; padding: 10px 24px; background: var(--accent); color: white; border-radius: 20px; text-decoration: none; font-size: 0.9rem; font-weight: 500; transition: all 0.2s; }
+.cta-btn:hover { background: #0769b8; transform: translateY(-1px); }
+
+/* Student section headers */
+.section-header { grid-column: 1 / -1; padding: 20px 0 8px; font-size: 1.2rem; font-weight: 600; border-bottom: 2px solid var(--accent); margin-bottom: 4px; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  #content { grid-template-columns: 1fr; padding: 0 16px 16px; }
+  header { padding: 12px 16px; }
+  .search { max-width: 100%; order: 3; }
+}
+@media (max-width: 1024px) and (min-width: 769px) {
+  #content { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .card { transition: none; }
+  .card:hover { transform: none; }
+}
 """
 
-JS = """
-document.querySelectorAll('.tab-btn').forEach(function(btn) {
-  btn.addEventListener('click', function() {
-    var target = this.dataset.tab;
-    document.querySelectorAll('.tab-btn').forEach(function(b) {
-      b.classList.remove('active');
-    });
-    document.querySelectorAll('.tab-content').forEach(function(c) {
-      c.classList.remove('active');
-    });
-    this.classList.add('active');
-    document.getElementById('tab-' + target).classList.add('active');
+DASHBOARD_JS = """
+const DATA = __DATA_JSON__;
+const TITLES = __TITLES_JSON__;
+let currentView = 'teacher'; // 'teacher' | 'student'
+let currentFilter = 'all';
+let searchQuery = '';
+
+function getTypeIcon(type) {
+  return { lecture: '\U0001f4d8', notebook: '\U0001f4d3', sample: '\U0001f9ea', demo: '\U0001f3ac' }[type] || '\U0001f4c1';
+}
+
+function getStatusDot(repo) {
+  if (repo.ci_status === 'success') return 'green';
+  if (repo.ci_status === 'failure') return 'red';
+  if (['in_progress', 'queued'].includes(repo.ci_status)) return 'yellow';
+  return 'gray';
+}
+
+function relativeTime(dateStr) {
+  if (!dateStr) return '';
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 60) return mins + ' min';
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + 'h';
+  const days = Math.floor(hours / 24);
+  return days + 'j';
+}
+
+function getDisplayTitle(repo) {
+  return TITLES[repo.name] || repo.name.replace(/^(lecture|notebook|sample|demo)-/, '').replace(/-/g, ' ');
+}
+
+function render() {
+  const main = document.getElementById('content');
+  const statsBar = document.getElementById('stats-bar');
+  const filterChips = document.getElementById('filter-chips');
+
+  // Filter repos
+  let repos = DATA.repos.filter(r => {
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      if (!r.name.toLowerCase().includes(q) && !(r.description||'').toLowerCase().includes(q) && !(r.topics||[]).some(t => t.includes(q))) return false;
+    }
+    if (currentFilter === 'lecture' && r.type !== 'lecture') return false;
+    if (currentFilter === 'notebook' && r.type !== 'notebook') return false;
+    if (currentFilter === 'failed' && r.ci_status !== 'failure') return false;
+    if (currentFilter === 'recent' && (!r.updated_at || Date.now() - new Date(r.updated_at).getTime() > 86400000)) return false;
+    if (currentView === 'student' && (!r.topics?.includes('status-active') || (r.ci_status !== 'success' && !r.stable_url))) return false;
+    return true;
   });
+
+  // Sort: teacher = failed first then by date; student = by name
+  if (currentView === 'teacher') {
+    const order = { failure: 0, in_progress: 1, queued: 2, success: 3, null: 4 };
+    repos.sort((a, b) => (order[a.ci_status]||4) - (order[b.ci_status]||4) || new Date(b.updated_at||0) - new Date(a.updated_at||0));
+  } else {
+    repos.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+  }
+
+  // Update stats (teacher only)
+  if (currentView === 'teacher') {
+    statsBar.style.display = 'flex';
+    const total = DATA.repos.length;
+    const green = DATA.repos.filter(r => r.ci_status === 'success').length;
+    const red = DATA.repos.filter(r => r.ci_status === 'failure').length;
+    const yellow = DATA.repos.filter(r => ['in_progress','queued'].includes(r.ci_status)).length;
+    statsBar.innerHTML = `
+      <span class="stat total" data-filter="all">\U0001f4e6 ${total} repos</span>
+      <span class="stat green" data-filter="green">\u2705 ${green} green</span>
+      <span class="stat red" data-filter="failed">\u274c ${red} erreurs</span>
+      <span class="stat yellow" data-filter="yellow">\U0001f504 ${yellow} en cours</span>
+      <span class="stat time">\U0001f550 ${new Date(DATA.generated_at).toLocaleDateString('fr-FR')}</span>
+    `;
+  } else {
+    statsBar.style.display = 'none';
+  }
+
+  // Render cards
+  if (currentView === 'student') {
+    // Group by type with section headers
+    const lectures = repos.filter(r => r.type === 'lecture');
+    const notebooks = repos.filter(r => r.type !== 'lecture');
+    let html = '';
+    if (lectures.length) {
+      html += '<div class="section-header">\U0001f4d8 Cours</div>';
+      html += lectures.map(r => studentCard(r)).join('');
+    }
+    if (notebooks.length) {
+      html += '<div class="section-header">\U0001f4d3 Notebooks & Pratiques</div>';
+      html += notebooks.map(r => studentCard(r)).join('');
+    }
+    if (!html) html = '<p style="grid-column:1/-1;text-align:center;color:var(--text-muted);padding:40px;">Aucun cours disponible.</p>';
+    main.innerHTML = html;
+  } else {
+    main.innerHTML = repos.map(r => teacherCard(r)).join('') || '<p style="grid-column:1/-1;text-align:center;color:var(--text-muted);padding:40px;">Aucun r\u00e9sultat.</p>';
+  }
+}
+
+function teacherCard(r) {
+  const dot = getStatusDot(r);
+  const ciEmoji = { success: '\u2705', failure: '\u274c', in_progress: '\U0001f504', queued: '\u23f3' }[r.ci_status] || '\u00b7';
+  const badges = (r.topics||[]).map(t => {
+    const cls = t.startsWith('area-') ? 'area' : t.startsWith('status-') ? t : 'topic';
+    return `<span class="badge ${cls}">${t.replace(/^(area|status|fmt)-/, '')}</span>`;
+  }).join('');
+  return `<article class="card">
+    <div class="card-header">
+      <span class="status-dot ${dot}"></span>
+      <span class="card-title">${getTypeIcon(r.type)} <a href="${r.github_url}" target="_blank">${r.name}</a></span>
+      <a class="ci-link" href="${r.ci_url||'#'}" title="CI: ${r.ci_status||'n/a'}">${ciEmoji}</a>
+    </div>
+    <p class="card-desc">${r.description||''}</p>
+    <div class="badges">${badges}</div>
+    <div class="card-links">
+      ${r.stable_url ? `<a href="${r.stable_url}" target="_blank">\U0001f4c4 View</a>` : ''}
+      ${r.develop_url ? `<a href="${r.develop_url}" target="_blank">\U0001f33f dev</a>` : ''}
+      ${r.ci_url ? `<a href="${r.ci_url}" target="_blank">\u2699\ufe0f CI</a>` : ''}
+      ${r.cf_url ? `<a href="${r.cf_url}" target="_blank">\u2601\ufe0f CF</a>` : ''}
+    </div>
+    <div class="card-footer">${r.updated_at ? 'Mis \u00e0 jour: ' + relativeTime(r.updated_at) : ''}</div>
+  </article>`;
+}
+
+function studentCard(r) {
+  const url = r.stable_url || r.develop_url || r.cf_url || r.github_url;
+  return `<article class="card student">
+    <div class="type-icon">${getTypeIcon(r.type)}</div>
+    <div class="card-title">${getDisplayTitle(r)}</div>
+    <p class="card-desc">${r.description||''}</p>
+    <a class="cta-btn" href="${url}" target="_blank">Commencer \u2192</a>
+  </article>`;
+}
+
+// Event listeners
+document.getElementById('search').addEventListener('input', e => { searchQuery = e.target.value; render(); });
+document.querySelectorAll('.toggle button').forEach(btn => btn.addEventListener('click', () => {
+  currentView = btn.dataset.view;
+  document.querySelectorAll('.toggle button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  render();
+}));
+document.getElementById('filter-chips').addEventListener('click', e => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  currentFilter = chip.dataset.filter;
+  document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+  chip.classList.add('active');
+  render();
 });
+document.getElementById('stats-bar').addEventListener('click', e => {
+  const stat = e.target.closest('.stat');
+  if (!stat || !stat.dataset.filter) return;
+  currentFilter = stat.dataset.filter === 'all' ? 'all' : stat.dataset.filter === 'green' ? 'all' : stat.dataset.filter;
+  // Map green\u2192all (show all), failed\u2192failed, yellow\u2192all
+  if (stat.dataset.filter === 'green') currentFilter = 'all';
+  document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+  const matching = document.querySelector(`.chip[data-filter="${currentFilter}"]`);
+  if (matching) matching.classList.add('active');
+  render();
+});
+
+// Initial render
+render();
 """
 
 
-def _is_legacy(topics):
-    return "status-legacy" in topics
-
-
-def _tab_for(name):
-    """Determine which tab a repo belongs to based on its name prefix."""
+def _repo_type(name):
+    """Derive the display type from the repo name prefix."""
     if name.startswith("lecture-"):
-        return "lectures"
+        return "lecture"
     if name.startswith("notebook-"):
-        return "notebooks"
+        return "notebook"
     if name.startswith("sample-"):
-        return "samples"
-    if name.startswith("demo-"):
-        return "demos"
-    return "other"
+        return "sample"
+    return "demo"
 
 
-def _badges_html(topics):
-    """Render ``area-*`` / ``status-*`` / ``fmt-*`` / ``review`` topics as
-    small colored badges (other topics are ignored)."""
-    out = []
-    for t in topics:
-        if t.startswith("area-"):
-            label, cls = t[len("area-"):], "badge-area"
-        elif t.startswith("status-"):
-            value = t[len("status-"):]
-            label = value
-            cls = "badge-status badge-status-%s" % value
-        elif t.startswith("fmt-"):
-            label = "Jupyter" if t == "fmt-ipynb" else t[len("fmt-"):]
-            cls = "badge-fmt"
-        elif t == "review":
-            label, cls = "review", "badge-review"
-        else:
-            continue
-        out.append('<span class="badge %s">%s</span>'
-                   % (cls, html.escape(label)))
-    return "".join(out)
+def _ci_status_normalized(ci):
+    """Normalize a latest_ci dict to a single status string for the JS layer.
 
-
-def _render_card(name, r):
-    """Render a single repo card as an HTML string.
-
-    Layout (consistent for every repo):
-      [type-icon] Name (-> GitHub)        [github icon]
-      description
-      [area badge] [status badge] [fmt badge] [review badge]
-      Links:
-        \U0001f3e0 Stable   -> GitHub Pages site (when enabled)
-        \U0001f33f develop  -> CF Pages preview + [env] status sha date
-        \U0001f331 features -> CF Pages previews of every other branch
-        \u2699\ufe0f CI        -> latest GitHub Actions run + sha branch date
+    Returns "success", "failure", "in_progress", "queued", or None.
     """
-    esc = html.escape
-    topics = r.get("topics") or []
-    legacy = _is_legacy(topics)
-    card_cls = "card legacy" if legacy else "card"
+    if not ci:
+        return None
+    status = ci.get("status")
+    conclusion = ci.get("conclusion")
+    if status == "completed":
+        if conclusion == "success":
+            return "success"
+        if conclusion == "failure":
+            return "failure"
+        return None  # cancelled / skipped / neutral / stale
+    if status in ("in_progress", "queued"):
+        return status
+    return None
 
-    tab = _tab_for(name)
-    icon = TYPE_ICONS.get(tab, TYPE_ICONS["other"])
-    title = r.get("readme_title") or name
-    gh_url = "https://github.com/%s/%s" % (ORG, name)
-    db = r.get("default_branch") or "main"
-    cf_deps = r.get("cf_deployments") or {}
-    pages = r.get("pages")
-    ci = r.get("latest_ci")
-    branches = r.get("branches") or []
-    all_branches = set(branches) | {db}
 
-    parts = []
-    parts.append('<section class="%s">' % card_cls)
+def _build_data(manifest):
+    """Build the DATA object embedded in the dashboard HTML."""
+    repos_data = []
+    for name, repo in sorted(manifest["repos"].items()):
+        pages = repo.get("pages")
+        stable_url = pages["html_url"] if pages else None
 
-    # Header: type icon + name (linked to GitHub) + GitHub icon.
-    parts.append('  <h2>')
-    parts.append('    <span class="type-icon" aria-hidden="true">%s</span>'
-                 % icon)
-    parts.append('    <a class="title-link" href="%s">%s</a>'
-                 % (esc(gh_url), esc(title)))
-    parts.append('    <span class="icon-links">')
-    parts.append(
-        '      <a class="icon-link" href="%s" target="_blank" '
-        'rel="noopener" title="GitHub">%s</a>'
-        % (esc(gh_url), GITHUB_SVG))
-    parts.append('    </span>')
-    parts.append('  </h2>')
+        cf_deps = repo.get("cf_deployments") or {}
+        develop_dep = cf_deps.get("develop")
+        develop_url = (develop_dep["url"]
+                       if develop_dep and develop_dep.get("url") else None)
 
-    # Description (if any)
-    if r.get("description"):
-        parts.append('  <p class="desc">%s</p>' % esc(r["description"]))
+        cf_url = None
+        if cf_deps:
+            cf_url = "https://%s.pages.dev" % name.lower().replace("_", "-")
 
-    # Topic badges (area / status / fmt / review)
-    badges = _badges_html(topics)
-    if badges:
-        parts.append('  <div class="badges">%s</div>' % badges)
+        ci = repo.get("latest_ci")
+        ci_status = _ci_status_normalized(ci)
+        ci_url = ci.get("html_url") if ci else None
 
-    # Links section
-    parts.append('  <div class="links">')
+        trunk = repo.get("trunk")
+        updated_at = trunk["date"] if trunk else None
 
-    # Stable: GitHub Pages (if enabled).
-    parts.append('    <div class="link-row">')
-    parts.append('      <span class="link-label">\U0001f3e0 Stable</span>')
-    if pages:
-        parts.append(
-            '      <a class="ref-link" href="%s" target="_blank" '
-            'rel="noopener">%s</a>'
-            % (esc(pages["html_url"]), esc(_domain(pages["html_url"]))))
-    else:
-        parts.append('      <span class="none">Pages not enabled</span>')
-    parts.append('    </div>')
+        repos_data.append({
+            "name": name,
+            "type": _repo_type(name),
+            "description": repo.get("description") or "",
+            "topics": repo.get("topics") or [],
+            "stable_url": stable_url,
+            "develop_url": develop_url,
+            "cf_url": cf_url,
+            "ci_status": ci_status,
+            "ci_url": ci_url,
+            "updated_at": updated_at,
+            "github_url": "https://github.com/%s/%s" % (ORG, name),
+        })
+    return {
+        "generated_at": manifest["generated_at"],
+        "repos": repos_data,
+    }
 
-    # develop: CF Pages preview (or GitHub branch link / dash).
-    parts.append(_branch_row("\U0001f33f develop", "develop", name,
-                             all_branches, cf_deps))
 
-    # Feature branches: CF Pages previews (or GitHub links).
-    feature_branches = [b for b in sorted(branches)
-                        if b != "gh-pages" and b != db]
-    if feature_branches:
-        chips = "".join(_branch_chip(b, name, cf_deps)
-                        for b in feature_branches)
-        parts.append('    <div class="link-row">')
-        parts.append('      <span class="link-label">\U0001f331 features</span>')
-        parts.append('      <span class="link-items">%s</span>' % chips)
-        parts.append('    </div>')
-    else:
-        parts.append(
-            '    <div class="link-row"><span class="link-label">'
-            '\U0001f331 features</span> <span class="none">&mdash;</span>'
-            '</div>')
+def _build_titles(manifest):
+    """Build the TITLES mapping (repo name -> README title) for the JS layer."""
+    titles = {}
+    for name, repo in manifest["repos"].items():
+        title = repo.get("readme_title")
+        if title:
+            titles[name] = title
+    return titles
 
-    # CI: latest GitHub Actions run.
-    parts.append('    <div class="link-row">')
-    parts.append('      <span class="link-label">\u2699\ufe0f CI</span>')
-    if ci and ci.get("html_url"):
-        emoji = _ci_status_emoji(ci.get("status"), ci.get("conclusion"))
-        label = ci.get("name") or "latest run"
-        parts.append(
-            '      <a class="ref-link" href="%s" target="_blank" '
-            'rel="noopener">%s %s</a>'
-            % (esc(ci["html_url"]), emoji, esc(label)))
-        meta_bits = [x for x in (_short(ci.get("head_sha")),
-                                 esc(ci.get("head_branch") or ""),
-                                 esc(_date10(ci.get("run_at")))) if x]
-        if meta_bits:
-            parts.append('      <span class="dep-meta">%s</span>'
-                         % " &middot; ".join(meta_bits))
-    else:
-        parts.append('      <span class="none">&mdash;</span>')
-    parts.append('    </div>')
 
-    parts.append('  </div>')
-    parts.append('</section>')
-    return "\n".join(parts)
+def _safe_json(obj):
+    """Serialize to JSON safe for embedding in a <script> tag.
+
+    Escapes ``</`` sequences to prevent premature ``</script>`` closure.
+    """
+    return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
 
 
 def _render_html(manifest):
-    """Render the full index.html from the manifest dict."""
-    esc = html.escape
-    repos = manifest["repos"]
-    generated = esc(manifest["generated_at"])
-    count = manifest["count"]
+    """Render the full dual-view dashboard index.html from the manifest dict."""
+    data_json = _safe_json(_build_data(manifest))
+    titles_json = _safe_json(_build_titles(manifest))
 
-    # Group repos by tab
-    tab_groups = {
-        "lectures": [],
-        "notebooks": [],
-        "samples": [],
-        "demos": [],
-        "other": [],
-    }
-    for name in repos:
-        tab_groups[_tab_for(name)].append(name)
+    js = (DASHBOARD_JS
+          .replace("__DATA_JSON__", data_json)
+          .replace("__TITLES_JSON__", titles_json))
 
-    # Sort each tab: non-legacy first (alpha), then legacy (alpha)
-    for tab in tab_groups:
-        non_legacy = sorted(
-            n for n in tab_groups[tab]
-            if not _is_legacy(repos[n].get("topics") or []))
-        legacy = sorted(
-            n for n in tab_groups[tab]
-            if _is_legacy(repos[n].get("topics") or []))
-        tab_groups[tab] = non_legacy + legacy
-
-    # Tab definitions in display order
-    tab_defs = [
-        ("lectures", "Lectures"),
-        ("notebooks", "Notebooks"),
-        ("samples", "Samples"),
-        ("demos", "Demos"),
-    ]
-    if tab_groups["other"]:
-        tab_defs.append(("other", "Other"))
-
-    # Build tab buttons
-    tab_buttons = []
-    for i, (tab_id, tab_label) in enumerate(tab_defs):
-        active = " active" if i == 0 else ""
-        n = len(tab_groups[tab_id])
-        tab_buttons.append(
-            '<button class="tab-btn%s" data-tab="%s">%s (%d)</button>'
-            % (active, tab_id, esc(tab_label), n))
-
-    # Build tab content panes
-    tab_contents = []
-    for i, (tab_id, _label) in enumerate(tab_defs):
-        active = " active" if i == 0 else ""
-        names = tab_groups[tab_id]
-        if names:
-            cards = "\n".join(_render_card(n, repos[n]) for n in names)
-        else:
-            cards = '<p class="none">No repositories.</p>'
-        tab_contents.append(
-            '<div class="tab-content%s" id="tab-%s">\n%s\n</div>'
-            % (active, tab_id, cards))
-
-    parts = []
-    parts.append("<!doctype html>")
-    parts.append('<html lang="en">')
-    parts.append("<head>")
-    parts.append('<meta charset="utf-8">')
-    parts.append('<meta name="viewport" '
-                 'content="width=device-width, initial-scale=1">')
-    parts.append("<title>Emmanuel BRUNO teaching catalog</title>")
-    parts.append("<style>%s</style>" % CSS)
-    parts.append("</head>")
-    parts.append("<body>")
-    parts.append('<div class="wrap">')
-    parts.append("<h1>Emmanuel BRUNO teaching catalog</h1>")
-    parts.append('<p class="philosophy">%s</p>' % esc(PHILOSOPHY))
-    parts.append(
-        '<div class="meta">Generated %s &middot; %d repos '
-        '&middot; auto-updates every 6h &middot; '
-        '<a href="https://github.com/ebpro/teaching-catalog">'
-        'teaching-catalog</a></div>' % (generated, count))
-    parts.append('<div class="tabs">\n%s\n</div>'
-                 % "\n".join(tab_buttons))
-    parts.extend(tab_contents)
-    parts.append("</div>")
-    parts.append("<script>%s</script>" % JS)
-    parts.append("</body>")
-    parts.append("</html>")
-    parts.append("")
-    return "\n".join(parts)
+    return (
+        '<!DOCTYPE html>\n'
+        '<html lang="fr">\n'
+        '<head>\n'
+        '  <meta charset="utf-8">\n'
+        '  <meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '  <title>ebpro \u2014 Plateforme d\u2019enseignement</title>\n'
+        '  <style>%s</style>\n'
+        '</head>\n'
+        '<body>\n'
+        '  <header>\n'
+        '    <h1>\U0001f4da ebpro <span>\u2014 Plateforme d\u2019enseignement</span></h1>\n'
+        '    <input type="search" id="search" class="search" '
+        'placeholder="Rechercher un cours..." aria-label="Rechercher">\n'
+        '    <div class="toggle" role="tablist">\n'
+        '      <button class="active" data-view="teacher" role="tab">'
+        '\U0001f468\u200d\U0001f3eb Enseignant</button>\n'
+        '      <button data-view="student" role="tab">'
+        '\U0001f393 \u00c9tudiant</button>\n'
+        '    </div>\n'
+        '  </header>\n'
+        '  <div id="stats-bar"></div>\n'
+        '  <div id="filter-chips">\n'
+        '    <span class="chip active" data-filter="all">Tous</span>\n'
+        '    <span class="chip" data-filter="lecture">\U0001f4d8 Cours</span>\n'
+        '    <span class="chip" data-filter="notebook">\U0001f4d3 Notebooks</span>\n'
+        '    <span class="chip" data-filter="failed">\u274c Erreurs</span>\n'
+        '    <span class="chip" data-filter="recent">\U0001f550 R\u00e9cents (24h)</span>\n'
+        '  </div>\n'
+        '  <main id="content"></main>\n'
+        '  <script>%s</script>\n'
+        '</body>\n'
+        '</html>\n'
+        % (DASHBOARD_CSS, js)
+    )
 
 
 # --- entry point ----------------------------------------------------------
