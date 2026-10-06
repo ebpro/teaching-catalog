@@ -542,21 +542,36 @@ def _branch_row(label, branch, name, all_branches, cf_deps):
 
 DASHBOARD_CSS = """
 :root {
-  --bg-dark: #1a1a2e;
-  --bg-page: #f0f2f5;
-  --bg-card: #ffffff;
-  --text: #2d3436;
-  --text-muted: #636e72;
-  --accent: #0984e3;
-  --success: #00b894;
-  --error: #d63031;
-  --warning: #fdcb6e;
+  --color-bg: #f8fafc;
+  --color-surface: #ffffff;
+  --color-text: #1e293b;
+  --color-text-muted: #64748b;
+  --color-primary: #3b82f6;
+  --color-primary-hover: #2563eb;
+  --color-success: #22c55e;
+  --color-error: #ef4444;
+  --color-warning: #f59e0b;
+  --color-border: #e2e8f0;
   --radius: 12px;
-  --shadow: 0 2px 8px rgba(0,0,0,0.08);
-  --shadow-hover: 0 8px 24px rgba(0,0,0,0.12);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.12);
+  --max-width: 1200px;
+  /* legacy aliases (kept for existing rules) */
+  --bg-dark: #1a1a2e;
+  --bg-page: var(--color-bg);
+  --bg-card: var(--color-surface);
+  --text: var(--color-text);
+  --text-muted: var(--color-text-muted);
+  --accent: var(--color-primary);
+  --success: var(--color-success);
+  --error: var(--color-error);
+  --warning: var(--color-warning);
+  --shadow: var(--shadow-sm);
+  --shadow-hover: var(--shadow-md);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif; background: var(--bg-page); color: var(--text); line-height: 1.6; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif; background: var(--bg-page); color: var(--text); line-height: 1.6; overflow-x: hidden; }
+.card-title a { overflow-wrap: break-word; word-break: break-all; }
 
 /* Header */
 header { position: sticky; top: 0; z-index: 100; background: var(--bg-dark); color: white; padding: 16px 24px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
@@ -586,7 +601,7 @@ header h1 span { opacity: 0.7; font-weight: 400; }
 .chip:hover { border-color: var(--accent); }
 
 /* Card grid */
-#content { padding: 0 24px 24px; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+#content { max-width: var(--max-width); margin: 0 auto; padding: 0 16px 24px; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
 
 /* Teacher card */
 .card { background: var(--bg-card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px; transition: all 0.2s; position: relative; }
@@ -610,7 +625,7 @@ header h1 span { opacity: 0.7; font-weight: 400; }
 .badge.status-legacy { background: #dfe6e9; color: #636e72; }
 .badge.topic { background: #f0f0f0; color: #636e72; }
 .card-links { display: flex; gap: 12px; padding-top: 12px; border-top: 1px solid #f0f0f0; font-size: 0.8rem; }
-.card-links a { color: var(--accent); text-decoration: none; }
+.card-links a { color: var(--accent); text-decoration: none; min-height: 44px; display: inline-flex; align-items: center; }
 .card-links a:hover { text-decoration: underline; }
 .card-footer { margin-top: 8px; font-size: 0.75rem; color: var(--text-muted); }
 
@@ -619,7 +634,7 @@ header h1 span { opacity: 0.7; font-weight: 400; }
 .card.student .type-icon { font-size: 2.5rem; margin-bottom: 12px; }
 .card.student .card-title { font-size: 1.1rem; font-family: inherit; font-weight: 600; }
 .card.student .card-desc { -webkit-line-clamp: 3; }
-.cta-btn { display: inline-block; margin-top: 16px; padding: 10px 24px; background: var(--accent); color: white; border-radius: 20px; text-decoration: none; font-size: 0.9rem; font-weight: 500; transition: all 0.2s; }
+.cta-btn { display: inline-flex; align-items: center; justify-content: center; margin-top: 16px; padding: 12px 24px; min-height: 44px; background: var(--accent); color: white; border-radius: 20px; text-decoration: none; font-size: 0.9rem; font-weight: 500; transition: all 0.2s; }
 .cta-btn:hover { background: #0769b8; transform: translateY(-1px); }
 
 /* Student section headers */
@@ -628,8 +643,11 @@ header h1 span { opacity: 0.7; font-weight: 400; }
 /* Responsive */
 @media (max-width: 768px) {
   #content { grid-template-columns: 1fr; padding: 0 16px 16px; }
-  header { padding: 12px 16px; }
-  .search { max-width: 100%; order: 3; }
+  header { flex-direction: column; gap: 12px; padding: 12px 16px; }
+  .search { max-width: 100%; width: 100%; order: 3; }
+  #filter-chips { flex-wrap: wrap; }
+  body { font-size: 16px; }
+  #stats-bar { padding: 12px 16px; }
 }
 @media (max-width: 1024px) and (min-width: 769px) {
   #content { grid-template-columns: repeat(2, 1fr); }
@@ -648,6 +666,7 @@ const TITLES = __TITLES_JSON__;
 let currentView = 'teacher'; // 'teacher' | 'student'
 let currentFilter = 'all';
 let searchQuery = '';
+let _loaded = false;
 
 function getTypeIcon(type) {
   return { lecture: '\U0001f4d8', notebook: '\U0001f4d3', sample: '\U0001f9ea', demo: '\U0001f3ac' }[type] || '\U0001f4c1';
@@ -734,10 +753,22 @@ function render() {
       html += '<div class="section-header">\U0001f4d3 Notebooks & Pratiques</div>';
       html += notebooks.map(r => studentCard(r)).join('');
     }
-    if (!html) html = '<p style="grid-column:1/-1;text-align:center;color:var(--text-muted);padding:40px;">Aucun cours disponible.</p>';
     main.innerHTML = html;
   } else {
-    main.innerHTML = repos.map(r => teacherCard(r)).join('') || '<p style="grid-column:1/-1;text-align:center;color:var(--text-muted);padding:40px;">Aucun r\u00e9sultat.</p>';
+    main.innerHTML = repos.map(r => teacherCard(r)).join('');
+  }
+
+  // Loading / empty state management
+  if (!_loaded) {
+    document.getElementById('loading').style.display = 'none';
+    _loaded = true;
+  }
+  if (repos.length === 0) {
+    main.style.display = 'none';
+    document.getElementById('empty').style.display = 'block';
+  } else {
+    main.style.display = 'grid';
+    document.getElementById('empty').style.display = 'none';
   }
 }
 
@@ -909,6 +940,15 @@ def _render_html(manifest):
           .replace("__DATA_JSON__", data_json)
           .replace("__TITLES_JSON__", titles_json))
 
+    # Format the generation date for the footer
+    gen_at = manifest.get("generated_at", "")
+    try:
+        from datetime import datetime as _dt
+        _d = _dt.fromisoformat(gen_at.replace("Z", "+00:00"))
+        date_str = _d.strftime("%d %B %Y")
+    except Exception:
+        date_str = gen_at[:10] if gen_at else ""
+
     return (
         '<!DOCTYPE html>\n'
         '<html lang="fr">\n'
@@ -938,11 +978,22 @@ def _render_html(manifest):
         '    <span class="chip" data-filter="failed">\u274c Erreurs</span>\n'
         '    <span class="chip" data-filter="recent">\U0001f550 R\u00e9cents (24h)</span>\n'
         '  </div>\n'
-        '  <main id="content"></main>\n'
+        '  <div id="loading" style="text-align:center;padding:60px 20px;color:#64748b;">\n'
+        '    <div style="font-size:32px;margin-bottom:12px;">\u23f3</div>\n'
+        '    Chargement du catalogue\u2026\n'
+        '  </div>\n'
+        '  <main id="content" style="display:none"></main>\n'
+        '  <div id="empty" style="display:none;text-align:center;padding:60px 20px;color:#64748b;">\n'
+        '    <div style="font-size:32px;margin-bottom:12px;">\U0001f50d</div>\n'
+        '    Aucun r\u00e9sultat trouv\u00e9\n'
+        '  </div>\n'
+        '  <footer style="text-align:center;padding:32px 16px;color:#94a3b8;font-size:13px;border-top:1px solid #e2e8f0;margin-top:48px;">\n'
+        '    G\u00e9n\u00e9r\u00e9 le %s \u00b7 <a href="https://github.com/ebpro" style="color:#3b82f6;">ebpro</a>\n'
+        '  </footer>\n'
         '  <script>%s</script>\n'
         '</body>\n'
         '</html>\n'
-        % (DASHBOARD_CSS, js)
+        % (DASHBOARD_CSS, date_str, js)
     )
 
 
