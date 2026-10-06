@@ -646,6 +646,19 @@ header h1 span { opacity: 0.7; font-weight: 400; }
 .cta-dev:hover { background: var(--color-primary-hover); }
 .cta-github { background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); font-size: 14px; padding: 8px 16px; border-radius: 8px; }
 .cta-github:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.cta-group { display: flex; flex-direction: column; gap: 8px; align-items: center; margin-top: 16px; }
+.cta-group .cta-btn { margin-top: 0; }
+.cta-current { background: var(--accent); color: white; font-size: 16px; padding: 12px 24px; border-radius: 8px; font-weight: 600; }
+.cta-current:hover { background: #0769b8; }
+.cta-stable-secondary { background: transparent; color: var(--color-success); border: 1px solid var(--color-success); font-size: 13px; padding: 6px 14px; border-radius: 6px; font-weight: 500; }
+.cta-stable-secondary:hover { background: var(--color-success); color: white; }
+
+/* Teacher CF branch links */
+.card-cf-branches { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--color-border); }
+.cf-branch-link { font-size: 11px; color: var(--color-text); text-decoration: none; padding: 3px 8px; background: #f0f9ff; border-radius: 4px; border: 1px solid #bae6fd; display: inline-flex; align-items: center; gap: 4px; }
+.cf-branch-link:hover { border-color: var(--accent); background: #e0f2fe; }
+.cf-branch-link code { font-size: 11px; color: var(--accent); }
+.cf-env { font-size: 9px; color: var(--color-text-muted); background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }
 
 /* Student section headers */
 .section-header { grid-column: 1 / -1; padding: 20px 0 8px; font-size: 1.2rem; font-weight: 600; border-bottom: 2px solid var(--accent); margin-bottom: 4px; }
@@ -795,18 +808,30 @@ function teacherCard(r) {
     <p class="card-desc">${r.description||''}</p>
     <div class="badges">${badges}</div>
     <div class="card-links">
-      ${r.stable_url ? `<a href="${r.stable_url}" target="_blank">\U0001f4c4 View</a>` : ''}
-      ${r.develop_url ? `<a href="${r.develop_url}" target="_blank">\U0001f33f dev</a>` : ''}
+      ${r.develop_url ? `<a href="${r.develop_url}" target="_blank">\U0001f33f develop (CF)</a>` : ''}
+      ${r.stable_url ? `<a href="${r.stable_url}" target="_blank">\U0001f4c4 stable</a>` : ''}
       ${r.ci_url ? `<a href="${r.ci_url}" target="_blank">\u2699\ufe0f CI</a>` : ''}
-      ${r.cf_url ? `<a href="${r.cf_url}" target="_blank">\u2601\ufe0f CF</a>` : ''}
     </div>`;
-  const branchLinks = (r.branches || [])
-    .filter(b => b !== r.default_branch)
+  // CF branch preview links (with deployment status)
+  const cfDeps = r.cf_deployments || {};
+  const cfBranchEntries = Object.entries(cfDeps)
+    .filter(([, dep]) => dep && dep.url)
+    .map(([branch, dep]) => {
+      const statusIcon = dep.status === 'success' ? '\u2705' : dep.status === 'failure' ? '\u274c' : '\u23f3';
+      const envLabel = (dep.environment && dep.environment !== 'production') ? ` <span class="cf-env">${dep.environment}</span>` : '';
+      return `<a class="cf-branch-link" href="${dep.url}" target="_blank" rel="noopener" title="CF Pages \u2014 ${branch} (${dep.environment || 'preview'})">${statusIcon} <code>${branch}</code>${envLabel}</a>`;
+    })
+    .join('');
+  // GitHub-only branches (no CF deployment)
+  const ghOnlyBranches = (r.branches || [])
+    .filter(b => b !== r.default_branch && !cfDeps[b])
     .slice(0, 5)
     .map(b => `<a class="branch-link" href="${r.github_url}/tree/${encodeURIComponent(b)}" title="${b}">${b.startsWith('feature/') ? '\u2728' : b.startsWith('fix/') ? '\U0001f527' : '\U0001f33f'} ${b.replace(/^(feature|fix|hotfix)\\//, '')}</a>`)
     .join('');
-  if (branchLinks) {
-    html += `<div class="card-branches">${branchLinks}</div>`;
+  const cfBranchHtml = cfBranchEntries ? `<div class="card-cf-branches">${cfBranchEntries}</div>` : '';
+  const ghBranchHtml = ghOnlyBranches ? `<div class="card-branches">${ghOnlyBranches}</div>` : '';
+  if (cfBranchHtml || ghBranchHtml) {
+    html += cfBranchHtml + ghBranchHtml;
   }
   html += `<div class="card-footer">${r.updated_at ? 'Mis \u00e0 jour: ' + relativeTime(r.updated_at) : ''}</div>
   </article>`;
@@ -815,18 +840,24 @@ function teacherCard(r) {
 
 function studentCard(r) {
   let cta;
-  if (r.stable_url) {
+  if (r.develop_url) {
+    // Primary: CF Pages develop (current version students should see)
+    cta = `<a class="cta-btn cta-current" href="${r.develop_url}" target="_blank">\U0001f4d6 Consulter le cours</a>`;
+    if (r.stable_url) {
+      cta += `<a class="cta-btn cta-stable-secondary" href="${r.stable_url}" target="_blank">\U0001f4ca Version stable</a>`;
+    }
+  } else if (r.stable_url) {
+    // No CF deploy yet → stable (GitHub Pages) is primary
     cta = `<a class="cta-btn cta-stable" href="${r.stable_url}" target="_blank">\U0001f4d6 Consulter le cours</a>`;
-  } else if (r.develop_url || r.cf_url) {
-    cta = `<a class="cta-btn cta-dev" href="${r.develop_url || r.cf_url}" target="_blank">\U0001f6a7 Version dev (pas encore de version stable)</a>`;
   } else {
+    // Fallback: GitHub repo
     cta = `<a class="cta-btn cta-github" href="${r.github_url}" target="_blank">\U0001f4bb Voir sur GitHub</a>`;
   }
   return `<article class="card student">
     <div class="type-icon">${getTypeIcon(r.type)}</div>
     <div class="card-title">${getDisplayTitle(r)}</div>
     <p class="card-desc">${r.description||''}</p>
-    ${cta}
+    <div class="cta-group">${cta}</div>
   </article>`;
 }
 
@@ -906,10 +937,6 @@ def _build_data(manifest):
         develop_url = (develop_dep["url"]
                        if develop_dep and develop_dep.get("url") else None)
 
-        cf_url = None
-        if cf_deps:
-            cf_url = "https://%s.pages.dev" % name.lower().replace("_", "-")
-
         ci = repo.get("latest_ci")
         ci_status = _ci_status_normalized(ci)
         ci_url = ci.get("html_url") if ci else None
@@ -924,7 +951,8 @@ def _build_data(manifest):
             "topics": repo.get("topics") or [],
             "stable_url": stable_url,
             "develop_url": develop_url,
-            "cf_url": cf_url,
+            "cf_develop_url": develop_url,
+            "cf_deployments": cf_deps,
             "ci_status": ci_status,
             "ci_url": ci_url,
             "updated_at": updated_at,
