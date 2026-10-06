@@ -627,6 +627,9 @@ header h1 span { opacity: 0.7; font-weight: 400; }
 .card-links { display: flex; gap: 12px; padding-top: 12px; border-top: 1px solid #f0f0f0; font-size: 0.8rem; }
 .card-links a { color: var(--accent); text-decoration: none; min-height: 44px; display: inline-flex; align-items: center; }
 .card-links a:hover { text-decoration: underline; }
+.card-branches { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--color-border); }
+.branch-link { font-size: 11px; color: var(--color-text-muted); text-decoration: none; padding: 2px 6px; background: var(--color-bg); border-radius: 4px; border: 1px solid var(--color-border); }
+.branch-link:hover { color: var(--color-primary); border-color: var(--color-primary); }
 .card-footer { margin-top: 8px; font-size: 0.75rem; color: var(--text-muted); }
 
 /* Student card */
@@ -636,6 +639,13 @@ header h1 span { opacity: 0.7; font-weight: 400; }
 .card.student .card-desc { -webkit-line-clamp: 3; }
 .cta-btn { display: inline-flex; align-items: center; justify-content: center; margin-top: 16px; padding: 12px 24px; min-height: 44px; background: var(--accent); color: white; border-radius: 20px; text-decoration: none; font-size: 0.9rem; font-weight: 500; transition: all 0.2s; }
 .cta-btn:hover { background: #0769b8; transform: translateY(-1px); }
+.cta-stable { background: var(--color-success); color: white; font-size: 16px; padding: 12px 24px; border-radius: 8px; font-weight: 600; }
+.cta-stable:hover { background: #16a34a; }
+.cta-dev { background: var(--color-primary); color: white; font-size: 14px; padding: 10px 20px; border-radius: 8px; font-weight: 500; position: relative; }
+.cta-dev::before { content: 'DEV'; position: absolute; top: -6px; right: -6px; background: #fbbf24; color: #78350f; font-size: 9px; font-weight: 700; padding: 2px 5px; border-radius: 4px; }
+.cta-dev:hover { background: var(--color-primary-hover); }
+.cta-github { background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); font-size: 14px; padding: 8px 16px; border-radius: 8px; }
+.cta-github:hover { border-color: var(--color-primary); color: var(--color-primary); }
 
 /* Student section headers */
 .section-header { grid-column: 1 / -1; padding: 20px 0 8px; font-size: 1.2rem; font-weight: 600; border-bottom: 2px solid var(--accent); margin-bottom: 4px; }
@@ -663,7 +673,7 @@ header h1 span { opacity: 0.7; font-weight: 400; }
 DASHBOARD_JS = """
 const DATA = __DATA_JSON__;
 const TITLES = __TITLES_JSON__;
-let currentView = 'teacher'; // 'teacher' | 'student'
+let currentView = 'student'; // 'teacher' | 'student'
 let currentFilter = 'all';
 let searchQuery = '';
 let _loaded = false;
@@ -675,7 +685,6 @@ function getTypeIcon(type) {
 function getStatusDot(repo) {
   if (repo.ci_status === 'success') return 'green';
   if (repo.ci_status === 'failure') return 'red';
-  if (['in_progress', 'queued'].includes(repo.ci_status)) return 'yellow';
   return 'gray';
 }
 
@@ -709,7 +718,7 @@ function render() {
     if (currentFilter === 'notebook' && r.type !== 'notebook') return false;
     if (currentFilter === 'failed' && r.ci_status !== 'failure') return false;
     if (currentFilter === 'recent' && (!r.updated_at || Date.now() - new Date(r.updated_at).getTime() > 86400000)) return false;
-    if (currentView === 'student' && (!r.topics?.includes('status-active') || (r.ci_status !== 'success' && !r.stable_url))) return false;
+    if (currentView === 'student' && !r.topics?.includes('status-active')) return false;
     return true;
   });
 
@@ -727,12 +736,10 @@ function render() {
     const total = DATA.repos.length;
     const green = DATA.repos.filter(r => r.ci_status === 'success').length;
     const red = DATA.repos.filter(r => r.ci_status === 'failure').length;
-    const yellow = DATA.repos.filter(r => ['in_progress','queued'].includes(r.ci_status)).length;
     statsBar.innerHTML = `
       <span class="stat total" data-filter="all">\U0001f4e6 ${total} repos</span>
       <span class="stat green" data-filter="green">\u2705 ${green} green</span>
       <span class="stat red" data-filter="failed">\u274c ${red} erreurs</span>
-      <span class="stat yellow" data-filter="yellow">\U0001f504 ${yellow} en cours</span>
       <span class="stat time">\U0001f550 ${new Date(DATA.generated_at).toLocaleDateString('fr-FR')}</span>
     `;
   } else {
@@ -779,7 +786,7 @@ function teacherCard(r) {
     const cls = t.startsWith('area-') ? 'area' : t.startsWith('status-') ? t : 'topic';
     return `<span class="badge ${cls}">${t.replace(/^(area|status|fmt)-/, '')}</span>`;
   }).join('');
-  return `<article class="card">
+  let html = `<article class="card">
     <div class="card-header">
       <span class="status-dot ${dot}"></span>
       <span class="card-title">${getTypeIcon(r.type)} <a href="${r.github_url}" target="_blank">${r.name}</a></span>
@@ -792,18 +799,34 @@ function teacherCard(r) {
       ${r.develop_url ? `<a href="${r.develop_url}" target="_blank">\U0001f33f dev</a>` : ''}
       ${r.ci_url ? `<a href="${r.ci_url}" target="_blank">\u2699\ufe0f CI</a>` : ''}
       ${r.cf_url ? `<a href="${r.cf_url}" target="_blank">\u2601\ufe0f CF</a>` : ''}
-    </div>
-    <div class="card-footer">${r.updated_at ? 'Mis \u00e0 jour: ' + relativeTime(r.updated_at) : ''}</div>
+    </div>`;
+  const branchLinks = (r.branches || [])
+    .filter(b => b !== r.default_branch)
+    .slice(0, 5)
+    .map(b => `<a class="branch-link" href="${r.github_url}/tree/${encodeURIComponent(b)}" title="${b}">${b.startsWith('feature/') ? '\u2728' : b.startsWith('fix/') ? '\U0001f527' : '\U0001f33f'} ${b.replace(/^(feature|fix|hotfix)\\//, '')}</a>`)
+    .join('');
+  if (branchLinks) {
+    html += `<div class="card-branches">${branchLinks}</div>`;
+  }
+  html += `<div class="card-footer">${r.updated_at ? 'Mis \u00e0 jour: ' + relativeTime(r.updated_at) : ''}</div>
   </article>`;
+  return html;
 }
 
 function studentCard(r) {
-  const url = r.stable_url || r.develop_url || r.cf_url || r.github_url;
+  let cta;
+  if (r.stable_url) {
+    cta = `<a class="cta-btn cta-stable" href="${r.stable_url}" target="_blank">\U0001f4d6 Consulter le cours</a>`;
+  } else if (r.develop_url || r.cf_url) {
+    cta = `<a class="cta-btn cta-dev" href="${r.develop_url || r.cf_url}" target="_blank">\U0001f6a7 Version dev (pas encore de version stable)</a>`;
+  } else {
+    cta = `<a class="cta-btn cta-github" href="${r.github_url}" target="_blank">\U0001f4bb Voir sur GitHub</a>`;
+  }
   return `<article class="card student">
     <div class="type-icon">${getTypeIcon(r.type)}</div>
     <div class="card-title">${getDisplayTitle(r)}</div>
     <p class="card-desc">${r.description||''}</p>
-    <a class="cta-btn" href="${url}" target="_blank">Commencer \u2192</a>
+    ${cta}
   </article>`;
 }
 
@@ -905,6 +928,8 @@ def _build_data(manifest):
             "ci_status": ci_status,
             "ci_url": ci_url,
             "updated_at": updated_at,
+            "default_branch": repo.get("default_branch"),
+            "branches": repo.get("branches") or [],
             "github_url": "https://github.com/%s/%s" % (ORG, name),
         })
     return {
@@ -964,9 +989,9 @@ def _render_html(manifest):
         '    <input type="search" id="search" class="search" '
         'placeholder="Rechercher un cours..." aria-label="Rechercher">\n'
         '    <div class="toggle" role="tablist">\n'
-        '      <button class="active" data-view="teacher" role="tab">'
+        '      <button data-view="teacher" role="tab">'
         '\U0001f468\u200d\U0001f3eb Enseignant</button>\n'
-        '      <button data-view="student" role="tab">'
+        '      <button class="active" data-view="student" role="tab">'
         '\U0001f393 \u00c9tudiant</button>\n'
         '    </div>\n'
         '  </header>\n'
