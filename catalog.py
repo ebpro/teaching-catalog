@@ -29,6 +29,7 @@ Auth: reads ``GITHUB_TOKEN`` (required) and ``CF_API_TOKEN`` (optional) from the
 environment.
 """
 
+import argparse
 import base64
 import html
 import json
@@ -195,6 +196,29 @@ def _cf_get(url):
             _cf_other_logged = True
             sys.stderr.write("CF: non-HTTP error (first) on %s: %r\n"
                              % (url.split("?")[0], e))
+        return None, -1
+
+
+def _cf_delete(url):
+    """DELETE a Cloudflare API url. Returns a (body, status) tuple like
+    ``_cf_get``: (parsed_json, 200) on success; (None, http_code) on an HTTP
+    error; (None, -1) on any other failure. Never raises. The response body is
+    best-effort (an empty 204/202 body yields ``None``)."""
+    req = urllib.request.Request(url, method="DELETE", headers={
+        "Authorization": "Bearer " + CF_TOKEN,
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            try:
+                body = json.load(resp)
+            except Exception:
+                body = None
+            return body, resp.status
+    except urllib.error.HTTPError as e:
+        return None, e.code
+    except Exception:
         return None, -1
 
 
@@ -1130,9 +1154,161 @@ def main():
     return 0
 
 
+# --- CF Pages deployment cleanup ------------------------------------------
+
+def cmd_cleanup(args):
+    """Prune old Cloudflare Pages preview deployments.
+
+    Policy: keep the last ``N`` deployments per branch (default 3); the
+    production branch (``develop``) is never touched. Supports ``--dry-run``
+    (report only, no deletions) and ``--keep N``.
+    """
+    global CF_TOKEN
+    CF_TOKEN = os.environ.get("CF_API_TOKEN", "").strip()
+    if not CF_TOKEN:
+        sys.stderr.write("ERROR: CF_API_TOKEN environment variable is empty\n")
+        return 1
+
+    account_id = cf_account_id()
+    if not account_id:
+        sys.stderr.write("ERROR: Could not resolve CF account ID\n")
+        return 1
+
+    keep = args.keep
+    dry_run = args.dry_run
+    print("Account: %s" % account_id)
+    print("Retention: keep last %d per branch" % keep)
+    print("Mode: %s" % ("DRY RUN" if dry_run else "LIVE"))
+    print()
+
+    # List all Pages projects in the account (paginate).
+    projects = []
+    cursor = None
+    while True:
+        url = "%s/accounts/%s/pages/projects?per_page=50" % (CF_API, account_id)
+        if cursor:
+            url += "&cursor=" + cursor
+        data, status = _cf_get(url)
+        if not (isinstance(data, dict) and data.get("success")
+                and isinstance(data.get("result"), list)):
+            if data is None:
+                sys.stderr.write("CF: /pages/projects -> HTTP %s\n" % status)
+            break
+        projects.extend(data["result"])
+        info = data.get("result_info") or {}
+        if not info.get("has_more"):
+            break
+        cursor = info.get("cursor")
+        if not cursor:
+            break
+
+    print("Found %d Pages projects" % len(projects))
+    print()
+
+    total_deleted = 0
+    total_kept = 0
+
+    for project in projects:
+        proj_name = project.get("name", "")
+        if not proj_name:
+            continue
+
+        # All deployments for this project (paginate). NOTE: this endpoint
+        # rejects per_page > 20 (HTTP 400 / error 8000024), so 20 is the max.
+        deployments = []
+        cursor = None
+        while True:
+            url = "%s/accounts/%s/pages/projects/%s/deployments?per_page=20" % (
+                CF_API, account_id, proj_name)
+            if cursor:
+                url += "&cursor=" + cursor
+            data, status = _cf_get(url)
+            if not (isinstance(data, dict) and data.get("success")
+                    and isinstance(data.get("result"), list)):
+                if data is None:
+                    sys.stderr.write(
+                        "CF: /pages/projects/%s/deployments -> HTTP %s\n"
+                        % (proj_name, status))
+                break
+            deployments.extend(data["result"])
+            info = data.get("result_info") or {}
+            if not info.get("has_more"):
+                break
+            cursor = info.get("cursor")
+            if not cursor:
+                break
+
+        if not deployments:
+            continue
+
+        # Group by branch, newest first (created_on desc).
+        by_branch = {}
+        for dep in deployments:
+            by_branch.setdefault(dep.get("branch", "unknown"), []).append(dep)
+        for deps in by_branch.values():
+            deps.sort(key=lambda d: d.get("created_on", "") or "", reverse=True)
+
+        proj_deleted = 0
+        for branch, deps in by_branch.items():
+            # Never touch the production branch.
+            if branch == "develop":
+                total_kept += len(deps)
+                continue
+
+            to_keep = deps[:keep]
+            to_delete = deps[keep:]
+            total_kept += len(to_keep)
+            for dep in to_delete:
+                dep_id = dep.get("id", "")
+                dep_url = dep.get("url", "")
+                created = (dep.get("created_on", "") or "")[:10]
+                if dry_run:
+                    print("  [DRY] Would delete: %s / %s / %s (%s) %s"
+                          % (proj_name, branch, dep_id, created, dep_url))
+                    total_deleted += 1
+                    continue
+                del_url = "%s/accounts/%s/pages/projects/%s/deployments/%s" % (
+                    CF_API, account_id, proj_name, dep_id)
+                _body, status = _cf_delete(del_url)
+                if status in (200, 204):
+                    print("  [DEL] %s / %s / %s (%s)"
+                          % (proj_name, branch, dep_id, created))
+                    proj_deleted += 1
+                elif status == 404:
+                    print("  [404] %s / %s / %s (already gone)"
+                          % (proj_name, branch, dep_id))
+                else:
+                    print("  [ERR] %s / %s / %s: HTTP %s"
+                          % (proj_name, branch, dep_id, status))
+            total_deleted += proj_deleted
+
+        if proj_deleted > 0:
+            print("  %s: deleted %d" % (proj_name, proj_deleted))
+
+    print()
+    suffix = " (dry run)" if dry_run else ""
+    print("Summary: %d kept, %d deleted%s" % (total_kept, total_deleted, suffix))
+    return 0
+
+
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        argv = sys.argv[1:]
+        if not argv or argv[0] != "cleanup":
+            # No subcommand -> build the catalog (original behaviour).
+            sys.exit(main())
+        elif argv[0] == "cleanup":
+            parser_cleanup = argparse.ArgumentParser(
+                prog="catalog.py cleanup",
+                description="Prune old Cloudflare Pages preview deployments.")
+            parser_cleanup.add_argument(
+                "--keep", type=int, default=3,
+                help="Deployments to keep per branch (default: 3)")
+            parser_cleanup.add_argument(
+                "--dry-run", action="store_true",
+                help="Print deletions without executing")
+            args_cleanup = parser_cleanup.parse_args(argv[1:])
+            sys.exit(cmd_cleanup(args_cleanup))
     except Exception as e:
         sys.stderr.write("FATAL: %s\n" % e)
         sys.exit(1)

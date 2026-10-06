@@ -1,0 +1,47 @@
+name: CF Pages Cleanup
+description: Prune old Cloudflare Pages preview deployments (weekly)
+
+on:
+  schedule:
+    # Every Sunday at 04:00 UTC
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no actual deletions)"
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
+      keep:
+        description: "Deployments to keep per branch"
+        type: string
+        default: "3"
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: [self-hosted, linux, ebpro-org, x64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.EBPRO_CI_PAT || secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Run cleanup
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: |
+          DRY_RUN="${{ github.event.inputs.dry_run || 'false' }}"
+          KEEP="${{ github.event.inputs.keep || '3' }}"
+          if [ "$DRY_RUN" = "true" ]; then
+            python catalog.py cleanup --dry-run --keep "$KEEP"
+          else
+            python catalog.py cleanup --keep "$KEEP"
+          fi
