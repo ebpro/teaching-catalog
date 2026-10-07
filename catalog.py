@@ -69,6 +69,43 @@ _MAX_ATTEMPTS = 4
 _BACKOFFS = (30, 60, 120)
 _RETRYABLE_HTTP = (403, 429)
 
+# --- proactive rate-limit tracking ----------------------------------------
+# GitHub reports the *primary* (5000/hour) limit on every response. We track
+# it so we can pause *before* hitting the wall instead of eating 403s. The
+# *secondary* (abuse/burst) limits -- the ones that actually triggered the
+# fixed-30s sleeps -- are handled in _request via Retry-After + inter-repo
+# pacing. Both globals are refreshed on every successful response.
+_rate_limit_remaining = 5000  # initial assumption (overwritten by first response)
+_rate_limit_reset = 0         # unix timestamp of the next primary-limit reset
+
+
+def _check_rate_limit(headers):
+    """Update the tracked rate-limit state and proactively throttle.
+
+    Called on every successful response. If the primary limit is running low
+    (< 50 calls remaining) we sleep until the reset window + 1s buffer so the
+    next request starts in a fresh window instead of tripping a 403.
+    """
+    global _rate_limit_remaining, _rate_limit_reset
+    remaining = headers.get("X-RateLimit-Remaining")
+    reset = headers.get("X-RateLimit-Reset")
+    if remaining is not None:
+        try:
+            _rate_limit_remaining = int(remaining)
+        except (TypeError, ValueError):
+            pass
+    if reset is not None:
+        try:
+            _rate_limit_reset = int(reset)
+        except (TypeError, ValueError):
+            pass
+    if _rate_limit_remaining < 50 and _rate_limit_reset > 0:
+        wait = _rate_limit_reset - time.time() + 1
+        if wait > 0:
+            print("INFO: Rate limit low (%d remaining) - sleeping %.0fs "
+                  "until reset" % (_rate_limit_remaining, wait))
+            time.sleep(wait)
+
 
 def _request(url, none_on=(), attempts=_MAX_ATTEMPTS):
     """GET ``url`` and return the parsed JSON body.
@@ -95,14 +132,27 @@ def _request(url, none_on=(), attempts=_MAX_ATTEMPTS):
         })
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
+                _check_rate_limit(resp.headers)
                 return json.load(resp)
         except urllib.error.HTTPError as e:
             if e.code in _RETRYABLE_HTTP and attempt < attempts:
-                delay = _BACKOFFS[min(attempt - 1, len(_BACKOFFS) - 1)]
+                # Prefer the server-specified Retry-After (seconds) over the
+                # fixed backoff; fall back to the backoff schedule when the
+                # header is absent or not a plain integer (some clients emit
+                # an HTTP date instead).
+                wait = None
+                retry_after = e.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        wait = int(retry_after)
+                    except (TypeError, ValueError):
+                        wait = None
+                if wait is None:
+                    wait = _BACKOFFS[min(attempt - 1, len(_BACKOFFS) - 1)]
                 sys.stderr.write(
                     "WARN: HTTP %d on %s - sleeping %ds (attempt %d/%d)\n"
-                    % (e.code, url, delay, attempt, attempts))
-                time.sleep(delay)
+                    % (e.code, url, wait, attempt, attempts))
+                time.sleep(wait)
                 last_err = e
                 continue
             if e.code in none_on:
@@ -1138,6 +1188,7 @@ def main():
     kept.sort(key=lambda r: r["name"])
 
     data = {}
+    loop_start = time.time()
     for r in kept:
         name = r["name"]
         sys.stderr.write("Processing %s ...\n" % name)
@@ -1158,6 +1209,14 @@ def main():
             "latest_ci": fetch_latest_ci(r),
             "cf_deployments": cf_deps,
         }
+        # Inter-repo pacing: a small delay between repos keeps our request
+        # burst low enough to stay under GitHub's secondary (abuse) rate
+        # limits -- the ones that triggered the fixed-30s 403 sleeps.
+        time.sleep(0.1)
+    elapsed = time.time() - loop_start
+    print("Total: %d repos in %.1fs | API calls: %d | "
+          "Rate limit remaining: %d"
+          % (len(data), elapsed, _call_count, _rate_limit_remaining))
 
     if CF_TOKEN:
         sys.stderr.write(
