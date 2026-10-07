@@ -21,9 +21,11 @@ Renders a self-contained static ``index.html`` plus a machine-readable
 ``manifest.json`` under ``./public/``.
 
 Pure Python 3 stdlib. No third-party dependencies. Network calls are the GitHub
-REST API (always) and, when ``CF_API_TOKEN`` is set, the Cloudflare Pages API
-(best-effort: a CF failure never breaks the catalog). No threads (all calls are
-strictly sequential so the rate limit is respected).
+GraphQL API (bulk repo metadata: trunk head, branches, topics, description) plus
+the GitHub REST API (Pages / CI / README, which have no GraphQL equivalent) and,
+when ``CF_API_TOKEN`` is set, the Cloudflare Pages API (best-effort: a CF failure
+never breaks the catalog). No threads (all calls are strictly sequential so the
+rate limit is respected).
 
 Auth: reads ``GITHUB_TOKEN`` (required) and ``CF_API_TOKEN`` (optional) from the
 environment.
@@ -46,6 +48,7 @@ from datetime import datetime, timezone
 ORG = "ebpro"
 PREFIXES = ("notebook-", "lecture-", "sample-", "demo-")
 API = "https://api.github.com"
+GRAPHQL_API = "https://api.github.com/graphql"
 OUT_DIR = "public"
 USER_AGENT = "ebpro-teaching-catalog"
 GITHUB_IO_BASE = "https://ebpro.github.io"
@@ -193,6 +196,159 @@ def list_repos():
             break
         page += 1
     return repos
+
+
+# --- GraphQL bulk fetch ----------------------------------------------------
+#
+# The org has ~160 repos. Fetching trunk head, branch list, topics and
+# description one REST call at a time means ~5 calls per repo (~430 total).
+# GraphQL pulls all of that in a handful of paginated queries (one per 50
+# repos), collapsing the bulk into ~4 queries. Pages / CI / README have no
+# GraphQL equivalent and still go through the REST _request() path above.
+
+_graphql_call_count = 0
+
+
+def _graphql_query(query, variables=None, attempts=_MAX_ATTEMPTS):
+    """POST ``query`` to the GitHub GraphQL API and return the ``data`` object.
+
+    Retries with backoff on transient failures (HTTP 403/429 rate limit, or a
+    network blip), mirroring ``_request``. On final failure returns ``{}`` so a
+    single bad page degrades to "no more data" rather than crashing the run;
+    every error is logged to stderr. Uses the same ``TOKEN`` global as REST.
+    """
+    global _graphql_call_count
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        _graphql_call_count += 1
+        payload = json.dumps(
+            {"query": query, "variables": variables or {}}).encode()
+        req = urllib.request.Request(
+            GRAPHQL_API,
+            data=payload,
+            headers={
+                "Authorization": "Bearer " + TOKEN,
+                "Content-Type": "application/json",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": USER_AGENT,
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read())
+            if not isinstance(data, dict):
+                return {}
+            if "errors" in data:
+                sys.stderr.write("GraphQL errors: %s\n" % (data["errors"],))
+            return data.get("data") or {}
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", "replace")
+            except Exception:
+                pass
+            if e.code in _RETRYABLE_HTTP and attempt < attempts:
+                delay = _BACKOFFS[min(attempt - 1, len(_BACKOFFS) - 1)]
+                sys.stderr.write("GraphQL: HTTP %d - sleeping %ds "
+                                 "(attempt %d/%d)\n"
+                                 % (e.code, delay, attempt, attempts))
+                time.sleep(delay)
+                last_err = e
+                continue
+            sys.stderr.write("GraphQL HTTP %d: %s\n" % (e.code, body[:300]))
+            return {}
+        except (urllib.error.URLError, OSError) as e:
+            last_err = e
+            if attempt < attempts:
+                delay = _BACKOFFS[min(attempt - 1, len(_BACKOFFS) - 1)]
+                sys.stderr.write("GraphQL: network error (%r) - sleeping %ds "
+                                 "(attempt %d/%d)\n"
+                                 % (e, delay, attempt, attempts))
+                time.sleep(delay)
+                continue
+            sys.stderr.write("GraphQL: gave up after %d attempts: %r\n"
+                             % (attempts, last_err))
+            return {}
+    return {}
+
+
+def fetch_repos_graphql():
+    """Fetch every org repo + its metadata in a few paginated GraphQL queries.
+
+    Replaces ``list_repos()`` + per-repo ``fetch_trunk()`` + ``fetch_branches()``.
+    Returns a list of dicts, one per repo, with keys:
+
+      name, description, pushed_at, is_archived, visibility,
+      default_branch, last_commit_date, last_commit_sha,
+      branches (list of names, including the default branch),
+      topics (list of names)
+
+    ``default_branch`` falls back to ``"main"`` when the repo has no commits
+    yet (``defaultBranchRef`` is null). Callers filter the default branch out
+    of ``branches`` if they want non-default only.
+    """
+    all_repos = []
+    cursor = None
+    query = """
+    query GetRepos($login: String!, $cursor: String) {
+      rateLimit { cost remaining resetAt }
+      organization(login: $login) {
+        repositories(first: 50, after: $cursor,
+                     orderBy: {field: NAME, direction: ASC}) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            name
+            description
+            pushedAt
+            isArchived
+            visibility
+            defaultBranchRef {
+              name
+              target { ... on Commit { committedDate oid } }
+            }
+            refs(refPrefix: "refs/heads/", first: 30) { nodes { name } }
+            repositoryTopics(first: 20) { nodes { topic { name } } }
+          }
+        }
+      }
+    }
+    """
+    while True:
+        data = _graphql_query(query, {"login": ORG, "cursor": cursor})
+        org_data = data.get("organization") or {}
+        repos_data = org_data.get("repositories") or {}
+        nodes = repos_data.get("nodes") or []
+        for node in nodes:
+            ref = node.get("defaultBranchRef") or {}
+            target = ref.get("target") or {}
+            all_repos.append({
+                "name": node["name"],
+                "description": node.get("description"),
+                "pushed_at": node.get("pushedAt"),
+                "is_archived": node.get("isArchived", False),
+                "visibility": node.get("visibility", "PRIVATE"),
+                "default_branch": ref.get("name") or "main",
+                "last_commit_date": target.get("committedDate"),
+                "last_commit_sha": target.get("oid"),
+                "branches": [b["name"]
+                             for b in (node.get("refs") or {}).get("nodes") or []],
+                "topics": [t["topic"]["name"]
+                           for t in (node.get("repositoryTopics") or {}).get("nodes") or []
+                           if t.get("topic")],
+            })
+        if not nodes and cursor is None:
+            # First page came back empty: org resolution or token-scope problem.
+            sys.stderr.write("GraphQL: no repos returned for org=%r - check "
+                             "GITHUB_TOKEN scope / org access\n" % ORG)
+        page_info = repos_data.get("pageInfo") or {}
+        if page_info.get("hasNextPage") and page_info.get("endCursor"):
+            cursor = page_info["endCursor"]
+        else:
+            break
+    sys.stderr.write("GraphQL: fetched %d repos (%d queries)\n"
+                     % (len(all_repos), _graphql_call_count))
+    return all_repos
 
 
 # --- Cloudflare Pages API layer (best-effort; never raises) ---------------
@@ -1182,9 +1338,17 @@ def main():
         return 1
     CF_TOKEN = os.environ.get("CF_API_TOKEN", "").strip()
 
-    repos = list_repos()
-    kept = [r for r in repos
-            if r["name"].startswith(PREFIXES) and not r.get("archived")]
+    all_repos = fetch_repos_graphql()
+    if not all_repos:
+        # A 0-repo result means the bulk GraphQL fetch failed outright (bad
+        # token scope / org resolution). Aborting here (non-zero exit) stops
+        # the deploy step from publishing an empty catalog over production.
+        sys.stderr.write(
+            "FATAL: GraphQL returned 0 repos - aborting to avoid deploying "
+            "an empty catalog (check GITHUB_TOKEN scope / org access)\n")
+        return 1
+    kept = [r for r in all_repos
+            if r["name"].startswith(PREFIXES) and not r["is_archived"]]
     kept.sort(key=lambda r: r["name"])
 
     data = {}
@@ -1195,9 +1359,14 @@ def main():
         # CF Pages deployments lookup: {} locally (no CF_API_TOKEN); in CI it
         # maps branch -> {url, environment, status, sha, created_on, ...}.
         cf_deps = cf_deployments_for(name) if CF_TOKEN else {}
-        trunk = fetch_trunk(r)
-        branches = fetch_branches(r)
         db = r["default_branch"]
+        # Trunk head, branch list and topics come from the GraphQL bulk fetch
+        # (fetch_repos_graphql); only Pages / CI / README still hit REST.
+        trunk_date = r.get("last_commit_date")
+        trunk = ({"branch": db, "sha": r.get("last_commit_sha"),
+                  "date": trunk_date, "subject": None}
+                 if trunk_date else None)
+        branches = sorted(b for b in (r.get("branches") or []) if b != db)
         data[name] = {
             "default_branch": db,
             "readme_title": fetch_readme_title(r),
@@ -1249,6 +1418,7 @@ def main():
         "Wrote %s/ (2-page Web Components catalog, %d repos)\n"
         % (OUT_DIR, len(data)))
     print("Total GitHub API requests: %d" % _call_count)
+    print("Total GraphQL queries: %d" % _graphql_call_count)
     if CF_TOKEN:
         print("Total Cloudflare API requests: %d" % _cf_call_count)
         print("CF account id: %s" % (cf_account_id() or "NONE"))
