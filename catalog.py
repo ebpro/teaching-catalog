@@ -777,14 +777,6 @@ def _write_file(path, content):
         f.write(content)
 
 
-def _render_redirects():
-    """Render the Cloudflare Pages ``_redirects`` file."""
-    return (
-        "/etudiant /etudiant.html 200\n"
-        "/enseignant /enseignant.html 200\n"
-    )
-
-
 def _render_data_js(data, titles, meta):
     """Render the ``data.js`` module with the actual catalog data."""
     return (
@@ -1318,7 +1310,6 @@ def _render_all(manifest):
 
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    _write_file(os.path.join(OUT_DIR, "_redirects"), _render_redirects())
     _write_file(os.path.join(OUT_DIR, "data.js"), _render_data_js(data, titles, meta))
     _write_file(os.path.join(OUT_DIR, "card.js"), _render_card_js())
     _write_file(os.path.join(OUT_DIR, "app.js"), _render_app_js())
