@@ -574,8 +574,8 @@ def _write_file(path, content):
 def _render_redirects():
     """Render the Cloudflare Pages ``_redirects`` file."""
     return (
-        "/etudiant /etudiant.html\n"
-        "/enseignant /enseignant.html\n"
+        "/etudiant /etudiant.html 200\n"
+        "/enseignant /enseignant.html 200\n"
     )
 
 
