@@ -72,6 +72,22 @@ _MAX_ATTEMPTS = 4
 _BACKOFFS = (30, 60, 120)
 _RETRYABLE_HTTP = (403, 429)
 
+# --- per-call pacing -------------------------------------------------------
+# Spacing every HTTP request (REST + GraphQL) by _API_CALL_INTERVAL keeps the
+# burst rate low enough to stay under GitHub's secondary (abuse) rate limits,
+# eliminating the fixed-30s 403 sleeps that previously triggered on bursts.
+_last_api_call = 0.0
+_API_CALL_INTERVAL = 0.2  # 200 ms between calls
+
+
+def _pace():
+    """Ensure minimum interval between API calls."""
+    global _last_api_call
+    elapsed = time.monotonic() - _last_api_call
+    if elapsed < _API_CALL_INTERVAL:
+        time.sleep(_API_CALL_INTERVAL - elapsed)
+    _last_api_call = time.monotonic()
+
 # --- proactive rate-limit tracking ----------------------------------------
 # GitHub reports the *primary* (5000/hour) limit on every response. We track
 # it so we can pause *before* hitting the wall instead of eating 403s. The
@@ -123,6 +139,7 @@ def _request(url, none_on=(), attempts=_MAX_ATTEMPTS):
       - 409 on the commits endpoint ("Git Repository is empty")
       - 404 on the compare endpoint (no common ancestor / branch gone)
     """
+    _pace()
     global _call_count
     last_err = None
     for attempt in range(1, attempts + 1):
@@ -217,6 +234,7 @@ def _graphql_query(query, variables=None, attempts=_MAX_ATTEMPTS):
     single bad page degrades to "no more data" rather than crashing the run;
     every error is logged to stderr. Uses the same ``TOKEN`` global as REST.
     """
+    _pace()
     global _graphql_call_count
     last_err = None
     for attempt in range(1, attempts + 1):
@@ -1352,8 +1370,9 @@ def main():
         # maps branch -> {url, environment, status, sha, created_on, ...}.
         cf_deps = cf_deployments_for(name) if CF_TOKEN else {}
         db = r["default_branch"]
-        # Trunk head, branch list and topics come from the GraphQL bulk fetch
-        # (fetch_repos_graphql); only Pages / CI / README still hit REST.
+        # Trunk head, branch list, topics and description come from the
+        # GraphQL bulk fetch (fetch_repos_graphql); only Pages / CI still hit
+        # the REST API.
         trunk_date = r.get("last_commit_date")
         trunk = ({"branch": db, "sha": r.get("last_commit_sha"),
                   "date": trunk_date, "subject": None}
@@ -1361,7 +1380,7 @@ def main():
         branches = sorted(b for b in (r.get("branches") or []) if b != db)
         data[name] = {
             "default_branch": db,
-            "readme_title": fetch_readme_title(r),
+            "readme_title": r.get("description") or "",
             "description": r.get("description"),
             "topics": r.get("topics") or [],
             "trunk": trunk,
@@ -1370,10 +1389,6 @@ def main():
             "latest_ci": fetch_latest_ci(r),
             "cf_deployments": cf_deps,
         }
-        # Inter-repo pacing: a small delay between repos keeps our request
-        # burst low enough to stay under GitHub's secondary (abuse) rate
-        # limits -- the ones that triggered the fixed-30s 403 sleeps.
-        time.sleep(0.1)
     elapsed = time.time() - loop_start
     print("Total: %d repos in %.1fs | API calls: %d | "
           "Rate limit remaining: %d"
