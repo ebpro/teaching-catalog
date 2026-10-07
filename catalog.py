@@ -513,7 +513,7 @@ def cf_deployments_for(name):
         branch = d.get("branch")
         du = d.get("url")
         created = d.get("created_on", "")
-        if not branch or not du:
+        if not du:
             continue
         summary = d.get("summary") or {}
         git_info = summary.get("git_info") or {}
@@ -527,9 +527,10 @@ def cf_deployments_for(name):
             "commit_message": git_info.get("commit_message") or "",
             "created_on": created,
         }
-        cur = latest.get(branch)
+        key = branch or d.get("environment") or "production"
+        cur = latest.get(key)
         if cur is None or created > cur["created_on"]:
-            latest[branch] = dep
+            latest[key] = dep
     return latest
 
 
