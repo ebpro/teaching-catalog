@@ -961,8 +961,8 @@ if (profile === 'teacher' && statsBar) {
 if (filterChips) {
   const chips = profile === 'teacher' 
     ? ['all','lecture','notebook','failed','recent']
-    : ['all','lecture','notebook'];
-  const labels = {all:'Tous',lecture:'📘 Cours',notebook:'📓 Notebooks',failed:'❌ Erreurs',recent:'🕐 Récents'};
+    : ['all','lecture','notebook','sample'];
+  const labels = {all:'Tous',lecture:'📘 Cours',notebook:'📓 Notebooks',sample:'💻 Examples',failed:'❌ Erreurs',recent:'🕐 Récents'};
   filterChips.innerHTML = chips.map(c => 
     `<button class="chip ${c==='all'?'active':''}" data-filter="${c}">${labels[c]}</button>`
   ).join('');
@@ -993,7 +993,8 @@ function getFiltered() {
   
   // Type filter
   if (currentFilter === 'lecture') items = items.filter(r => r.type === 'lecture');
-  else if (currentFilter === 'notebook') items = items.filter(r => r.type === 'notebook' || r.type === 'sample' || r.type === 'demo');
+  else if (currentFilter === 'notebook') items = items.filter(r => r.type === 'notebook');
+  else if (currentFilter === 'sample') items = items.filter(r => r.type === 'sample' || r.type === 'demo');
   else if (currentFilter === 'failed') items = items.filter(r => r.ci_status === 'failure');
   else if (currentFilter === 'recent') {
     const dayAgo = Date.now() - 86400000;
@@ -1036,18 +1037,15 @@ function render() {
   // Group by type for student view
   if (profile === 'student') {
     const lectures = items.filter(r => r.type === 'lecture');
-    const others = items.filter(r => r.type !== 'lecture');
+    const notebooks = items.filter(r => r.type === 'notebook');
+    const examples = items.filter(r => r.type === 'sample' || r.type === 'demo');
+    const section = (title, arr) =>
+      '<h2 class="section-title">' + title + '</h2><div class="card-grid">' +
+      arr.map(r => cardHtml(r)).join('') + '</div>';
     let html = '';
-    if (lectures.length) {
-      html += '<h2 class="section-title">📚 Cours</h2><div class="card-grid">';
-      html += lectures.map(r => cardHtml(r)).join('');
-      html += '</div>';
-    }
-    if (others.length) {
-      html += '<h2 class="section-title">📓 Notebooks &amp; Pratiques</h2><div class="card-grid">';
-      html += others.map(r => cardHtml(r)).join('');
-      html += '</div>';
-    }
+    if (lectures.length) html += section('📚 Cours', lectures);
+    if (notebooks.length) html += section('📓 Notebooks', notebooks);
+    if (examples.length) html += section('💻 Examples', examples);
     content.innerHTML = html;
   } else {
     content.innerHTML = '<div class="card-grid">' + items.map(r => cardHtml(r)).join('') + '</div>';
@@ -1481,9 +1479,11 @@ def main():
 def cmd_cleanup(args):
     """Prune old Cloudflare Pages preview deployments.
 
-    Policy: keep the last ``N`` deployments per branch (default 3); the
-    production branch (``develop``) is never touched. Supports ``--dry-run``
-    (report only, no deletions) and ``--keep N``.
+    Policy: keep the last ``N`` deployments per branch (default 2); the
+    production branch of each project (from the CF API, falling back to
+    ``develop``) is never touched, and the catalog's own ``teaching-catalog``
+    project is always skipped. Supports ``--dry-run`` (report only, no
+    deletions) and ``--keep N``.
     """
     global CF_TOKEN
     CF_TOKEN = os.environ.get("CF_API_TOKEN", "").strip()
@@ -1534,6 +1534,8 @@ def cmd_cleanup(args):
         proj_name = project.get("name", "")
         if not proj_name:
             continue
+        if proj_name == "teaching-catalog":
+            continue  # Never clean up the catalog's own deployments
 
         # All deployments for this project (paginate). NOTE: this endpoint
         # rejects per_page > 20 (HTTP 400 / error 8000024), so 20 is the max.
@@ -1570,10 +1572,14 @@ def cmd_cleanup(args):
         for deps in by_branch.values():
             deps.sort(key=lambda d: d.get("created_on", "") or "", reverse=True)
 
+        # Production branch for this project (from CF project metadata);
+        # fall back to "develop" to preserve the previous behaviour.
+        prod_branch = project.get("production_branch") or "develop"
+
         proj_deleted = 0
         for branch, deps in by_branch.items():
             # Never touch the production branch.
-            if branch == "develop":
+            if branch == prod_branch:
                 total_kept += len(deps)
                 continue
 
@@ -1624,8 +1630,8 @@ if __name__ == "__main__":
                 prog="catalog.py cleanup",
                 description="Prune old Cloudflare Pages preview deployments.")
             parser_cleanup.add_argument(
-                "--keep", type=int, default=3,
-                help="Deployments to keep per branch (default: 3)")
+                "--keep", type=int, default=2,
+                help="Deployments to keep per branch (default: 2)")
             parser_cleanup.add_argument(
                 "--dry-run", action="store_true",
                 help="Print deletions without executing")
