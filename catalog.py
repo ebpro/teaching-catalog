@@ -375,6 +375,10 @@ def fetch_repos_graphql():
 # and no CF calls are made (branch rows fall back to GitHub links). Every CF
 # failure is swallowed -> cf_deployments = {} so a Cloudflare problem can
 # never break the (GitHub-backed) catalog.
+#
+# Inverted approach: list all CF Pages projects ONCE (1-2 paginated calls),
+# then fetch deployments only for the projects that match our catalog repos.
+# Total CF API calls: ~26 instead of 87 (56 of which were 404s).
 
 CF_TOKEN = ""
 CF_API = "https://api.cloudflare.com/client/v4"
@@ -382,13 +386,9 @@ _cf_call_count = 0
 _cf_account_id = None
 _cf_account_fetched = False
 _cf_accounts_status = None
-_cf_proj_found = 0
-_cf_proj_404 = 0
-_cf_proj_auth = 0
-_cf_proj_other = 0
+_cf_projects_listed = 0
+_cf_deployments_fetched = 0
 _cf_other_logged = False
-_cf_other_body_logged = False
-_cf_found_body_logged = False
 
 
 def _cf_get(url):
@@ -396,6 +396,7 @@ def _cf_get(url):
     (parsed_json, 200) on success; (None, http_code) on an HTTP error;
     (None, -1) on any other failure (network, timeout, ...). Never raises."""
     global _cf_call_count, _cf_other_logged
+    _pace()
     _cf_call_count += 1
     req = urllib.request.Request(url, headers={
         "Authorization": "Bearer " + CF_TOKEN,
@@ -447,13 +448,19 @@ def _cf_delete(url):
 
 
 def cf_account_id():
-    """Fetch the Cloudflare account id ONCE (cached). None on any failure."""
+    """Fetch the Cloudflare account id ONCE (cached). None on any failure.
+    Prefers the CF_ACCOUNT_ID environment variable when set (saves 1 call)."""
     global _cf_account_id, _cf_account_fetched, _cf_accounts_status
     if _cf_account_fetched:
         return _cf_account_id
     _cf_account_fetched = True
     if not CF_TOKEN:
         return None  # no token -> no CF at all (guarantees zero CF calls)
+    env_id = os.environ.get("CF_ACCOUNT_ID", "").strip()
+    if env_id:
+        _cf_account_id = env_id
+        _cf_accounts_status = 0
+        return _cf_account_id
     data, status = _cf_get(CF_API + "/accounts")
     _cf_accounts_status = status
     try:
@@ -469,75 +476,90 @@ def cf_account_id():
     return _cf_account_id
 
 
-def cf_deployments_for(name):
-    """Map of ``{branch: deployment}`` for the repo's CF Pages project.
+def cf_list_all_projects():
+    """List ALL Cloudflare Pages projects in the account (paginated).
 
-    Project name = repo basename lowercased with ``_`` -> ``-``. For each
-    branch (both ``preview`` and ``production`` environments) keeps the most
-    recent (max ``created_on``) deployment, capturing the fields needed to
-    render the same info the CF Pages dashboard shows:
-
-        url, environment, status, sha, commit_message, created_on
-
-    404 / any error -> ``{}``.
+    Returns ``{project_name: {"subdomain": str, "production_branch": str}}``.
+    Uses 1-2 API calls (50 projects per page). On any failure returns ``{}``.
     """
+    global _cf_projects_listed
     acct = cf_account_id()
     if not acct:
         return {}
-    project = name.lower().replace("_", "-")
+    projects = {}
+    cursor = None
+    while True:
+        url = "%s/accounts/%s/pages/projects?per_page=50" % (CF_API, acct)
+        if cursor:
+            url += "&cursor=%s" % cursor
+        data, status = _cf_get(url)
+        if not (isinstance(data, dict) and data.get("success")
+                and isinstance(data.get("result"), list)):
+            if status != 200:
+                sys.stderr.write(
+                    "CF: /pages/projects -> HTTP %s (stopping pagination)\n"
+                    % status)
+            break
+        for p in data["result"]:
+            name = p.get("name", "")
+            if name:
+                projects[name] = {
+                    "subdomain": p.get("subdomain") or name,
+                    "production_branch": p.get("production_branch") or "main",
+                }
+        info = data.get("result_info") or {}
+        if info.get("cursor"):
+            cursor = info["cursor"]
+        else:
+            break
+    _cf_projects_listed = len(projects)
+    sys.stderr.write("CF: listed %d projects\n" % len(projects))
+    return projects
+
+
+def cf_get_deployments(project_name, per_page=20):
+    """Map of ``{branch: deployment}`` for a single CF Pages project.
+
+    For each branch (both ``preview`` and ``production`` environments) keeps
+    the most recent (max ``created_on``) deployment, capturing the fields
+    needed to render the same info the CF Pages dashboard shows:
+
+        url, branch, environment, status, sha, commit_message, created_on
+
+    Uses 1 API call. On any failure returns ``{}``.
+    """
+    global _cf_deployments_fetched
+    acct = cf_account_id()
+    if not acct:
+        return {}
     # per_page must be <= 20 for this endpoint: per_page=100 is rejected with
     # HTTP 400 / error 8000024. 20 is the documented default and is ample for
     # the latest deployment per branch.
-    url = "%s/accounts/%s/pages/projects/%s/deployments?per_page=20" % (
-        CF_API, acct, project)
+    url = "%s/accounts/%s/pages/projects/%s/deployments?per_page=%d" % (
+        CF_API, acct, project_name, per_page)
     data, status = _cf_get(url)
     if not (isinstance(data, dict) and data.get("success")
             and isinstance(data.get("result"), list)):
-        # Categorize the failure so the run log is self-diagnosing.
-        if status == 404:
-            global _cf_proj_404
-            _cf_proj_404 += 1
-        elif status in (401, 403):
-            global _cf_proj_auth
-            _cf_proj_auth += 1
-        else:
-            global _cf_proj_other, _cf_other_body_logged
-            _cf_proj_other += 1
-            if not _cf_other_body_logged:
-                _cf_other_body_logged = True
-                if isinstance(data, dict):
-                    detail = "success=%r errors=%r result_type=%s" % (
-                        data.get("success"), data.get("errors"),
-                        type(data.get("result")).__name__)
-                else:
-                    detail = repr(data)[:400]
-                sys.stderr.write(
-                    "CF: other (status %s) project=%s | %s\n"
-                    % (status, project, detail))
+        if status != 200:
+            sys.stderr.write(
+                "CF: /pages/projects/%s/deployments -> HTTP %s\n"
+                % (project_name, status))
         return {}
-    global _cf_proj_found, _cf_found_body_logged
-    _cf_proj_found += 1
-    if not _cf_found_body_logged:
-        _cf_found_body_logged = True
-        envs = {}
-        for d in data["result"]:
-            env = d.get("environment")
-            envs[env] = envs.get(env, 0) + 1
-        sys.stderr.write(
-            "CF: first found project=%s deployments=%d environments=%r\n"
-            % (project, len(data["result"]), envs))
+    _cf_deployments_fetched += 1
     latest = {}
     for d in data["result"]:
-        branch = d.get("branch")
+        branch = d.get("branch") or ""
         du = d.get("url")
         created = d.get("created_on", "")
         if not du:
             continue
         summary = d.get("summary") or {}
         git_info = summary.get("git_info") or {}
+        env = d.get("environment") or ""
         dep = {
             "url": du,
-            "environment": d.get("environment"),
+            "branch": branch,
+            "environment": env,
             # Top-level status ("uploaded"/"in_progress"/"complete"/"error");
             # fall back to the summary status if the top-level one is absent.
             "status": d.get("status") or summary.get("status"),
@@ -545,7 +567,7 @@ def cf_deployments_for(name):
             "commit_message": git_info.get("commit_message") or "",
             "created_on": created,
         }
-        key = branch or d.get("environment") or "production"
+        key = branch or env or "production"
         cur = latest.get(key)
         if cur is None or created > cur["created_on"]:
             latest[key] = dep
@@ -1286,6 +1308,7 @@ def _build_data(manifest):
             "stable_url": stable_url,
             "develop_url": develop_url,
             "cf_develop_url": develop_url,
+            "cf_production_url": repo.get("cf_production_url"),
             "cf_deployments": cf_deps,
             "ci_status": ci_status,
             "ci_url": ci_url,
@@ -1361,14 +1384,31 @@ def main():
             if r["name"].startswith(PREFIXES) and not r["is_archived"]]
     kept.sort(key=lambda r: r["name"])
 
+    # --- Cloudflare Pages (inverted: list projects first, then fetch) ------
+    cf_projects = {}
+    cf_data_all = {}
+    cf_production_urls = {}
+    if CF_TOKEN:
+        sys.stderr.write("Fetching Cloudflare Pages data...\n")
+        cf_projects = cf_list_all_projects()
+        our_cf_names = set(r["name"].lower().replace("_", "-") for r in kept)
+        for proj_name in cf_projects:
+            if proj_name in our_cf_names:
+                cf_data_all[proj_name] = cf_get_deployments(proj_name)
+                cf_production_urls[proj_name] = (
+                    "https://%s.pages.dev" % cf_projects[proj_name]["subdomain"])
+        sys.stderr.write(
+            "CF: %d projects listed, %d in catalog\n"
+            % (len(cf_projects), len(cf_data_all)))
+
     data = {}
     loop_start = time.time()
     for r in kept:
         name = r["name"]
         sys.stderr.write("Processing %s ...\n" % name)
-        # CF Pages deployments lookup: {} locally (no CF_API_TOKEN); in CI it
-        # maps branch -> {url, environment, status, sha, created_on, ...}.
-        cf_deps = cf_deployments_for(name) if CF_TOKEN else {}
+        cf_proj_name = name.lower().replace("_", "-")
+        cf_deps = cf_data_all.get(cf_proj_name, {})
+        cf_prod_url = cf_production_urls.get(cf_proj_name)
         db = r["default_branch"]
         # Trunk head, branch list, topics and description come from the
         # GraphQL bulk fetch (fetch_repos_graphql); only Pages / CI still hit
@@ -1387,6 +1427,7 @@ def main():
             "branches": branches,
             "pages": fetch_pages(r),
             "latest_ci": fetch_latest_ci(r),
+            "cf_production_url": cf_prod_url,
             "cf_deployments": cf_deps,
         }
     elapsed = time.time() - loop_start
@@ -1397,11 +1438,10 @@ def main():
     if CF_TOKEN:
         sys.stderr.write(
             "CF: account=%s (accounts HTTP %s) | cf_api_calls=%d | "
-            "projects: found=%d not_found_404=%d auth_err_401_403=%d "
-            "other_err=%d\n"
+            "projects listed=%d deployments fetched=%d\n"
             % ((cf_account_id() or "NONE"), _cf_accounts_status,
-               _cf_call_count, _cf_proj_found, _cf_proj_404,
-               _cf_proj_auth, _cf_proj_other))
+               _cf_call_count, _cf_projects_listed,
+               _cf_deployments_fetched))
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).strftime(
