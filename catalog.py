@@ -394,34 +394,44 @@ _cf_other_logged = False
 def _cf_get(url):
     """GET a Cloudflare API url. Returns a (body, status) tuple:
     (parsed_json, 200) on success; (None, http_code) on an HTTP error;
-    (None, -1) on any other failure (network, timeout, ...). Never raises."""
+    (None, -1) on any other failure (network, timeout, ...). Never raises.
+
+    Transient failures (non-404 HTTP errors, network/timeout errors) are
+    retried once after a short pause. 404 is definitive (no retry)."""
     global _cf_call_count, _cf_other_logged
-    _pace()
-    _cf_call_count += 1
-    req = urllib.request.Request(url, headers={
-        "Authorization": "Bearer " + CF_TOKEN,
-        "Content-Type": "application/json",
-        "User-Agent": USER_AGENT,
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.load(resp), resp.status
-    except urllib.error.HTTPError as e:
-        if not _cf_other_logged:
-            _cf_other_logged = True
-            try:
-                body = e.read().decode("utf-8", "replace")[:400]
-            except Exception:
-                body = "<unreadable>"
-            sys.stderr.write("CF: HTTP %s (first) on %s: %s\n"
-                             % (e.code, url.split("?")[0], body))
-        return None, e.code
-    except Exception as e:
-        if not _cf_other_logged:
-            _cf_other_logged = True
-            sys.stderr.write("CF: non-HTTP error (first) on %s: %r\n"
-                             % (url.split("?")[0], e))
-        return None, -1
+    last_status = -1
+    for attempt in range(2):
+        _pace()
+        _cf_call_count += 1
+        req = urllib.request.Request(url, headers={
+            "Authorization": "Bearer " + CF_TOKEN,
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.load(resp), resp.status
+        except urllib.error.HTTPError as e:
+            last_status = e.code
+            if not _cf_other_logged:
+                _cf_other_logged = True
+                try:
+                    body = e.read().decode("utf-8", "replace")[:400]
+                except Exception:
+                    body = "<unreadable>"
+                sys.stderr.write("CF: HTTP %s (first) on %s: %s\n"
+                                 % (e.code, url.split("?")[0], body))
+            if e.code == 404:
+                return None, e.code  # Not found is definitive
+        except Exception as e:
+            last_status = -1
+            if not _cf_other_logged:
+                _cf_other_logged = True
+                sys.stderr.write("CF: non-HTTP error (first) on %s: %r\n"
+                                 % (url.split("?")[0], e))
+        if attempt == 0:
+            time.sleep(2)
+    return None, last_status
 
 
 def _cf_delete(url):
@@ -1390,14 +1400,35 @@ def main():
         sys.stderr.write("Fetching Cloudflare Pages data...\n")
         cf_projects = cf_list_all_projects()
         our_cf_names = set(r["name"].lower().replace("_", "-") for r in kept)
-        for proj_name in cf_projects:
-            if proj_name in our_cf_names:
-                cf_data_all[proj_name] = cf_get_deployments(proj_name)
-                cf_production_urls[proj_name] = (
-                    "https://%s.pages.dev" % cf_projects[proj_name]["subdomain"])
-        sys.stderr.write(
-            "CF: %d projects listed, %d in catalog\n"
-            % (len(cf_projects), len(cf_data_all)))
+        if cf_projects:
+            # Fast path: list-all worked, only fetch the matching projects.
+            for proj_name in cf_projects:
+                if proj_name in our_cf_names:
+                    cf_data_all[proj_name] = cf_get_deployments(proj_name)
+                    cf_production_urls[proj_name] = (
+                        "https://%s.pages.dev"
+                        % cf_projects[proj_name]["subdomain"])
+            sys.stderr.write(
+                "CF: %d projects listed, %d in catalog\n"
+                % (len(cf_projects), len(cf_data_all)))
+        else:
+            # Fallback: list-all returned 0 (token scope gap - can read
+            # individual project deployments but cannot enumerate the
+            # account's projects). Try the per-repo deployments path, which
+            # worked before the inversion. Production subdomain is unknown
+            # (no list-all), so fall back to the project name.
+            sys.stderr.write(
+                "CF: list-all returned 0 projects, falling back to per-repo\n")
+            for r in kept:
+                proj_name = r["name"].lower().replace("_", "-")
+                deps = cf_get_deployments(proj_name)
+                if deps:
+                    cf_data_all[proj_name] = deps
+                    cf_production_urls[proj_name] = (
+                        "https://%s.pages.dev" % proj_name)
+            sys.stderr.write(
+                "CF: per-repo fallback found %d projects\n"
+                % len(cf_data_all))
 
     data = {}
     loop_start = time.time()
