@@ -2,7 +2,12 @@ name: Teaching catalog
 on:
   schedule:
     - cron: '0 */6 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      preview_branch:
+        description: "If set, deploy a PREVIEW for this branch (empty = production, as today)"
+        required: false
+        default: ""
 permissions:
   contents: read
 jobs:
@@ -23,6 +28,7 @@ jobs:
       - name: Deploy to Cloudflare Pages (production)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          PREVIEW_BRANCH: ${{ github.event.inputs.preview_branch }}
         run: |
           set -euo pipefail
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "::error::CF_API_TOKEN secret not set"; exit 1; fi
@@ -32,4 +38,9 @@ jobs:
           # (non-zero exit), which we treat as OK and continue to the deploy.
           npx --yes wrangler@4.146.0 pages project create teaching-catalog --production-branch=main \
             || echo "::warning::pages project create non-zero (project likely already exists); continuing to deploy"
-          npx --yes wrangler@4.146.0 pages deploy ./public --project-name="teaching-catalog"
+          if [ -n "$PREVIEW_BRANCH" ]; then
+            echo "::notice::Deploying PREVIEW for branch '$PREVIEW_BRANCH' (production untouched)"
+            npx --yes wrangler@4.146.0 pages deploy ./public --project-name="teaching-catalog" --branch="$PREVIEW_BRANCH"
+          else
+            npx --yes wrangler@4.146.0 pages deploy ./public --project-name="teaching-catalog"
+          fi

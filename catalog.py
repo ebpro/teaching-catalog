@@ -661,15 +661,28 @@ class RepoCard extends HTMLElement {
     const title = TITLES[d.name] || d.name.replace(/[-_]/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
 
     if (this._profile === 'student') {
+      const isExample = (d.type === 'sample' || d.type === 'demo');
+      // develop button → "Version de travail" for lectures/notebooks, "Consulter le cours" for examples
+      const developCta = d.develop_url
+        ? `<a class="cta cta-primary" href="${d.develop_url}" target="_blank" rel="noopener">${isExample ? '📖 Consulter le cours' : '🔧 Version de travail'}</a>`
+        : (isExample ? '' : `<span class="cta cta-disabled" title="Pas encore disponible">🔧 Version de travail</span>`);
+      // stable button (unchanged)
+      const stableCta = d.stable_url
+        ? `<a class="cta cta-secondary" href="${d.stable_url}" target="_blank" rel="noopener">📊 Version stable</a>`
+        : `<span class="cta cta-disabled" title="Pas encore disponible">📊 Version stable</span>`;
+      // GitHub button: examples ONLY (fallback when no develop and no stable)
+      const githubCta = (isExample && !d.develop_url && !d.stable_url)
+        ? `<a class="cta cta-secondary" href="${d.github_url}" target="_blank" rel="noopener">💻 Voir sur GitHub</a>`
+        : '';
       this.innerHTML = `
         <div class="card-inner">
           <div class="card-icon">${icon}</div>
           <h3 class="card-title">${title}</h3>
           ${d.description ? `<p class="card-desc">${d.description}</p>` : ''}
           <div class="card-cta">
-            ${d.develop_url ? `<a class="cta cta-primary" href="${d.develop_url}" target="_blank" rel="noopener">📖 Consulter le cours</a>` : ''}
-            ${d.stable_url ? `<a class="cta cta-secondary" href="${d.stable_url}" target="_blank" rel="noopener">📊 Version stable</a>` : `<span class="cta cta-disabled" title="Pas encore disponible">📊 Version stable</span>`}
-            ${!d.develop_url && !d.stable_url ? `<a class="cta cta-secondary" href="${d.github_url}" target="_blank" rel="noopener">💻 Voir sur GitHub</a>` : ''}
+            ${developCta}
+            ${stableCta}
+            ${githubCta}
           </div>
         </div>`;
     } else {
