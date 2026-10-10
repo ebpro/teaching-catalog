@@ -199,22 +199,6 @@ def _request(url, none_on=(), attempts=_MAX_ATTEMPTS):
                        % (url, attempts, last_err))
 
 
-def list_repos():
-    """Return every org repo, paginating through all pages."""
-    repos = []
-    page = 1
-    while True:
-        url = "%s/orgs/%s/repos?per_page=100&type=all&page=%d" % (API, ORG, page)
-        data = _request(url)
-        if not isinstance(data, list) or not data:
-            break
-        repos.extend(data)
-        if len(data) < 100:
-            break
-        page += 1
-    return repos
-
-
 # --- GraphQL bulk fetch ----------------------------------------------------
 #
 # The org has ~160 repos. Fetching trunk head, branch list, topics and
@@ -294,7 +278,6 @@ def _graphql_query(query, variables=None, attempts=_MAX_ATTEMPTS):
 def fetch_repos_graphql():
     """Fetch every org repo + its metadata in a few paginated GraphQL queries.
 
-    Replaces ``list_repos()`` + per-repo ``fetch_trunk()`` + ``fetch_branches()``.
     Returns a list of dicts, one per repo, with keys:
 
       name, description, pushed_at, is_archived, visibility,
@@ -586,21 +569,6 @@ def cf_get_deployments(project_name, per_page=20):
 
 # --- per-repo topology ----------------------------------------------------
 
-def _short(sha):
-    return (sha or "")[:7]
-
-
-def _first_line(msg):
-    if not msg:
-        return ""
-    lines = [ln for ln in msg.strip().splitlines() if ln.strip()]
-    return lines[0].strip() if lines else ""
-
-
-def _date10(date):
-    return (date or "")[:10]
-
-
 def fetch_pages(repo):
     """GitHub Pages status for the repo, or None if Pages is not enabled.
 
@@ -648,175 +616,6 @@ def fetch_latest_ci(repo):
         "head_branch": run.get("head_branch"),
         "run_at": run.get("run_at"),
     }
-
-
-def fetch_trunk(repo):
-    """Head of the default branch (sha, date, subject).
-
-    Returns None for repos with no commits yet (empty placeholder repos).
-    """
-    name = repo["name"]
-    db = repo["default_branch"]
-    c = _request("%s/repos/%s/%s/commits/%s" % (API, ORG, name, db),
-                 none_on=(409,))
-    if c is None:
-        return None
-    return {
-        "branch": db,
-        "sha": c["sha"],
-        "date": c["commit"]["committer"]["date"],
-        "subject": _first_line(c["commit"]["message"]),
-    }
-
-
-def fetch_branches(repo):
-    """Every non-default branch name, sorted alphabetically.
-
-    No per-branch compare calls (saves one API call per branch). The display
-    only needs branch names, not divergence data.
-    """
-    name = repo["name"]
-    db = repo["default_branch"]
-    branches = _request("%s/repos/%s/%s/branches?per_page=100" % (API, ORG, name))
-    return sorted(b["name"] for b in branches if b["name"] != db)
-
-
-def fetch_readme_title(repo):
-    """Best-effort first ``# `` markdown heading from the repo's README, or None.
-
-    ``GET /repos/{org}/{repo}/readme?ref={default_branch}`` -> base64-decode
-    ``content`` -> first line matching ``^#\\s+`` -> strip the leading ``# ``.
-    A 404 / missing README / no ``# `` heading all yield None.
-    """
-    name = repo["name"]
-    db = repo["default_branch"]
-    try:
-        data = _request("%s/repos/%s/%s/readme?ref=%s" % (API, ORG, name, db),
-                        none_on=(404,), attempts=2)
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    content = data.get("content")
-    if not content:
-        return None
-    try:
-        if data.get("encoding", "base64") == "base64":
-            text = base64.b64decode(content).decode("utf-8", "replace")
-        else:
-            text = content
-    except Exception:
-        return None
-    for line in text.splitlines():
-        m = re.match(r"^#\s+(.*)$", line)
-        if m:
-            title = m.group(1).strip()
-            return title or None
-    return None
-
-
-# --- link / deployment helpers -------------------------------------------
-
-def _domain(url):
-    """Strip the scheme from a URL for compact display."""
-    if not url:
-        return ""
-    return re.sub(r"^https?://", "", url)
-
-
-def _cf_status_emoji(status):
-    """Map a CF Pages deployment status to a status glyph."""
-    if status == "complete":
-        return "\u2705"          # check mark
-    if status in ("in_progress", "uploaded"):
-        return "\U0001f504"      # cyclic arrows
-    if status == "error":
-        return "\u274c"          # cross mark
-    return "\u2b55"              # white circle
-
-
-def _ci_status_emoji(status, conclusion):
-    """Map a GitHub Actions run (status, conclusion) to a status glyph."""
-    if status == "completed":
-        if conclusion == "success":
-            return "\u2705"
-        if conclusion == "failure":
-            return "\u274c"
-        return "\u26a0\ufe0f"    # warning (cancelled/skipped/neutral/...)
-    if status in ("in_progress", "queued", "pending", "waiting"):
-        return "\U0001f504"
-    return "\u2b55"
-
-
-def _dep_meta(dep):
-    """Inner HTML for a CF deployment meta span: [env] status sha date."""
-    esc = html.escape
-    env = dep.get("environment")
-    parts = []
-    if env:
-        parts.append("[%s]" % esc(env))
-    parts.append(_cf_status_emoji(dep.get("status")))
-    sha = _short(dep.get("sha"))
-    if sha:
-        parts.append(esc(sha))
-    date = _date10(dep.get("created_on"))
-    if date:
-        parts.append(esc(date))
-    return " ".join(parts)
-
-
-def _branch_chip(branch, name, cf_deps):
-    """A single branch link with its CF deployment meta, or a GitHub fallback."""
-    esc = html.escape
-    dep = cf_deps.get(branch)
-    if dep and dep.get("url"):
-        title = ' title="CF Pages %s deployment"' % esc(
-            dep.get("environment") or "preview")
-        chip = ('<span class="chip">'
-                '<a class="ref-link" href="%s" target="_blank" '
-                'rel="noopener"%s><code>%s</code></a>'
-                % (esc(dep["url"]), title, esc(branch)))
-        meta = _dep_meta(dep)
-        if meta:
-            chip += '<span class="dep-meta">%s</span>' % meta
-        chip += "</span>"
-        return chip
-    gh_branch = "https://github.com/%s/%s/tree/%s" % (ORG, name, branch)
-    return ('<span class="chip">'
-            '<a class="ref-link" href="%s" target="_blank" '
-            'rel="noopener"><code>%s</code></a></span>'
-            % (esc(gh_branch), esc(branch)))
-
-
-def _branch_row(label, branch, name, all_branches, cf_deps):
-    """A full link-row for one named branch (e.g. ``develop``).
-
-    Shows the CF Pages preview + deployment meta when available; falls back to
-    a GitHub branch link when the branch exists but has no preview; a dash
-    when the branch does not exist at all.
-    """
-    esc = html.escape
-    dep = cf_deps.get(branch)
-    if dep and dep.get("url"):
-        title = ' title="CF Pages %s deployment"' % esc(
-            dep.get("environment") or "preview")
-        row = ('    <div class="link-row"><span class="link-label">%s</span> '
-               '<a class="ref-link" href="%s" target="_blank" '
-               'rel="noopener"%s><code>%s</code></a>'
-               % (label, esc(dep["url"]), title, esc(branch)))
-        meta = _dep_meta(dep)
-        if meta:
-            row += ' <span class="dep-meta">%s</span>' % meta
-        row += "</div>"
-        return row
-    if branch in all_branches:
-        gh_branch = "https://github.com/%s/%s/tree/%s" % (ORG, name, branch)
-        return ('    <div class="link-row"><span class="link-label">%s</span> '
-                '<a class="ref-link" href="%s" target="_blank" '
-                'rel="noopener"><code>%s</code></a></div>'
-                % (label, esc(gh_branch), esc(branch)))
-    return ('    <div class="link-row"><span class="link-label">%s</span> '
-            '<span class="none">&mdash;</span></div>' % label)
 
 
 # --- Web Components rendering ---------------------------------------------
