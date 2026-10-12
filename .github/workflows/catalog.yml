@@ -14,8 +14,8 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     concurrency:
-      catalog-build:
-        cancel-in-progress: true
+      group: catalog-build
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
         with:
