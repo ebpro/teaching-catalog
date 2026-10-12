@@ -13,6 +13,9 @@ permissions:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    concurrency:
+      catalog-build:
+        cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,22 +28,34 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.EBPRO_CI_PAT || secrets.GITHUB_TOKEN }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: python catalog.py
-      - name: Deploy to Cloudflare Pages (production)
+      - name: Deploy to teaching server (rsync subpath)
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          PREVIEW_BRANCH: ${{ github.event.inputs.preview_branch }}
+          DEPLOY_SSH_KEY: ${{ secrets.TEACHING_DEPLOY_SSH_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "::error::CF_API_TOKEN secret not set"; exit 1; fi
-          # Ensure the Pages project exists. wrangler 4.146.0 'pages deploy' does
-          # NOT auto-create the project, so we create it explicitly first. This is
-          # idempotent: on repeat runs wrangler reports the project already exists
-          # (non-zero exit), which we treat as OK and continue to the deploy.
-          npx --yes wrangler@4.146.0 pages project create teaching-catalog --production-branch=main \
-            || echo "::warning::pages project create non-zero (project likely already exists); continuing to deploy"
-          if [ -n "$PREVIEW_BRANCH" ]; then
-            echo "::notice::Deploying PREVIEW for branch '$PREVIEW_BRANCH' (production untouched)"
-            npx --yes wrangler@4.146.0 pages deploy ./public --project-name="teaching-catalog" --branch="$PREVIEW_BRANCH"
-          else
-            npx --yes wrangler@4.146.0 pages deploy ./public --project-name="teaching-catalog"
-          fi
+          if [ -z "$DEPLOY_SSH_KEY" ]; then echo "::error::TEACHING_DEPLOY_SSH_KEY secret not set"; exit 1; fi
+
+          # --- write SSH key to temp file ---
+          KEY_FILE="$(mktemp)"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          trap 'rm -f "$KEY_FILE"' EXIT
+
+          SSH_OPTS="-i $KEY_FILE -o StrictHostKeyChecking=accept-new"
+          REMOTE="bruno@vai.univ-tln.fr"
+
+          # --- rsync catalog into teaching-material/catalog/ (delete scoped to catalog/ only) ---
+          mkdir -p public
+          rsync -az --delete --mkpath -e "ssh $SSH_OPTS" \
+            ./public/ "${REMOTE}:teaching-material/catalog/"
+
+          # --- drop root redirect index (single file, no --delete at root) ---
+          INDEX_TMP="$(mktemp)"
+          cat > "$INDEX_TMP" <<'EOF'
+          <!doctype html><html lang="fr"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=catalog/"><title>ebpro</title></head><body><p><a href="catalog/">Catalog ebpro</a></p></body></html>
+          EOF
+          scp -i "$KEY_FILE" -o StrictHostKeyChecking=accept-new \
+            "$INDEX_TMP" "${REMOTE}:teaching-material/index.html"
+          rm -f "$INDEX_TMP"
+
+          echo "✅ catalog déployé vers bruno@vai.univ-tln.fr:teaching-material/catalog/"

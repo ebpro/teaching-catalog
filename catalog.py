@@ -1009,8 +1009,8 @@ def _render_landing():
     <h1>📚 ebpro</h1>
     <p>Plateforme d’enseignement — apprentissage par la pratique. Notebooks, cours et laboratoires interactifs avec intégration continue.</p>
     <div class="landing-buttons">
-      <a class="landing-btn" href="/etudiant"><span class="icon">🎓</span>Espace Étudiant</a>
-      <a class="landing-btn" href="/enseignant"><span class="icon">👨‍🏫</span>Espace Enseignant</a>
+      <a class="landing-btn" href="etudiant.html"><span class="icon">🎓</span>Espace Étudiant</a>
+      <a class="landing-btn" href="enseignant.html"><span class="icon">👨‍🏫</span>Espace Enseignant</a>
     </div>
     <div class="landing-stats" id="landing-stats"></div>
   </div>
@@ -1037,7 +1037,7 @@ def _render_profile_page(profile):
 </head>
 <body data-profile="student">
   <header>
-    <a class="back-link" href="/">←</a>
+    <a class="back-link" href="./">←</a>
     <h1>🎓 ebpro <span>— Espace Étudiant</span></h1>
     <input type="search" id="search" class="search" placeholder="Rechercher un cours...">
   </header>
@@ -1058,7 +1058,7 @@ def _render_profile_page(profile):
 </head>
 <body data-profile="teacher">
   <header>
-    <a class="back-link" href="/">←</a>
+    <a class="back-link" href="./">←</a>
     <h1>👨‍🏫 ebpro <span>— Espace Enseignant</span></h1>
     <input type="search" id="search" class="search" placeholder="Rechercher...">
   </header>
