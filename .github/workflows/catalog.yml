@@ -11,7 +11,7 @@ on:
 permissions:
   contents: read
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
     concurrency:
       group: catalog-build
@@ -28,6 +28,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.EBPRO_CI_PAT || secrets.GITHUB_TOKEN }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: python catalog.py
+      - name: Upload catalog site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-site
+          path: public/
+  deploy:
+    needs: build
+    runs-on: [self-hosted, linux, ebpro-org, x64]
+    steps:
+      - name: Download catalog site artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: catalog-site
+          path: public/
       - name: Deploy to teaching server (rsync subpath)
         env:
           DEPLOY_SSH_KEY: ${{ secrets.TEACHING_DEPLOY_SSH_KEY }}
