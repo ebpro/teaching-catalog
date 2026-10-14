@@ -11,7 +11,7 @@ self-contained static card grid of the teaching surface under ``./public/``:
   * card content: the human description as the primary line (2-line clamp)
     and the repo name as a small monospace secondary line, verbatim GitHub
     topic badges (area-* omitted; the card colour is the category signal),
-    and a daisyUI button footer: ``Site · Develop``, ``Site · Stable``
+    and a daisyUI button footer: ``Latest``, ``Site · Stable``
     (only when the repo has a ``v*`` tag), ``Source`` (public repos only)
     and a ``⎇ Branches ▾`` hover dropdown, plus the relative last-update
     date. Filters: category join-group (solid btn-primary when selected)
@@ -502,8 +502,12 @@ def _fetch_repo_extras(name, default_branch):
     except Exception as e:  # noqa: BLE001
         sys.stderr.write("WARN: tags fetch failed for %s (%s)\n" % (name, e))
         tg = None
+    # Branches dropdown exclusions: the repo default branch, ``gh-pages``
+    # (a render artefact, not a content branch) and the literal ``develop``
+    # (safety: already the canonical Latest target, never a preview row).
+    excluded = {default_branch, "gh-pages", "develop"}
     branches = sorted(b["name"] for b in (br or [])
-                      if b.get("name") and b["name"] != default_branch)
+                      if b.get("name") and b["name"] not in excluded)
     return branches, _latest_vtag(tg or [])
 
 
@@ -611,10 +615,15 @@ def _render_card(c):
         % (cat, esc_topics, CATEGORY_CARD[cat], muted),
         '<div class="card-body p-4 gap-0">',
     ]
+    # Primary line links to the site: ``stable/`` when the repo has a v* tag
+    # (same condition as the Site · Stable button), ``develop/`` otherwise.
+    primary_url = "%s/%s/%s/" % (
+        SITE_BASE, c["name"], "stable" if c["latest_vtag"] else "develop")
     if esc_desc:
         parts.append(
-            '<p class="text-base leading-snug line-clamp-2 break-words">'
-            '%s</p>' % esc_desc)
+            '<a href="%s" target="_blank" rel="noopener" '
+            'class="text-base leading-snug line-clamp-2 break-words '
+            'hover:underline">%s</a>' % (primary_url, esc_desc))
         parts.append(
             '<a href="%s" target="_blank" rel="noopener" '
             'class="mt-1 font-mono text-sm opacity-70 hover:opacity-100 '
@@ -623,7 +632,7 @@ def _render_card(c):
         parts.append(
             '<a href="%s" target="_blank" rel="noopener" '
             'class="text-base font-semibold hover:underline break-all">'
-            '%s</a>' % (c["github_url"], esc_name))
+            '%s</a>' % (primary_url, esc_name))
     # Topic badges: actual GitHub topics verbatim (no synthetic labels).
     badges = [t for t in c["topics"]
               if not t.startswith(BADGE_EXCLUDED_PREFIXES)]
@@ -633,11 +642,12 @@ def _render_card(c):
             % "".join('<span class="badge badge-outline badge-sm font-mono">'
                       '%s</span>' % html.escape(t) for t in badges))
 
-    # Footer buttons (daisyUI btn btn-xs). Site · Develop on every card
-    # (all three categories are Quarto render-callers).
+    # Footer buttons (daisyUI btn btn-xs). Latest (the former Site · Develop,
+    # label renamed per user spec; target unchanged) on every card — all
+    # three categories are Quarto render-callers.
     links = [
         '<a class="btn btn-xs" href="%s/%s/develop/" target="_blank" '
-        'rel="noopener">↗ Site · Develop</a>' % (SITE_BASE, c["name"]),
+        'rel="noopener">Latest</a>' % (SITE_BASE, c["name"]),
     ]
     # Site · Stable points at the canonical ``stable/`` pointer path
     # (written by the deploy-static job of _quarto-utils v1.3.23+ on v* tag
