@@ -11,11 +11,15 @@ self-contained static card grid of the teaching surface under ``./public/``:
   * card content: the human description as the primary line (2-line clamp)
     and the repo name as a small monospace secondary line, verbatim GitHub
     topic badges (area-* omitted; the card colour is the category signal),
-    and a daisyUI button footer: ``Latest``, ``Site · Stable``
-    (only when the repo has a ``v*`` tag), ``Source`` (public repos only)
-    and a ``⎇ Branches ▾`` hover dropdown, plus the relative last-update
-    date. Filters: category join-group (solid btn-primary when selected)
-    + collapsible topic multi-select (AND semantics), vanilla JS.
+    and a daisyUI button footer: ``Stable`` (solid, only when the repo
+    has a ``v*`` tag) BEFORE ``Latest`` (solid), ``Source`` (public repos
+    only) and a ``⎇ Branches ▾`` hover dropdown, plus the last-update date
+    (absolute short French date at build time, rewritten to "il y a X"
+    by JS when available). Topics render as soft rounded pastilles
+    (badge-soft, deterministic hue). Filters: sticky bar with live
+    search + category join-group (solid btn-primary when selected) +
+    topic checkbox dropdown (AND semantics) + result count; vanilla JS,
+    visibility via inline style.display (no utility-class fragility).
 
 Branch/tag data is fetched per displayed repo (2 REST calls each,
 ThreadPool(8)); a per-repo fetch failure degrades silently to hiding the
@@ -561,26 +565,23 @@ def _status_of(repo):
     return None
 
 
-def _relative_fr(iso):
-    """``2026-10-11T08:12:00Z`` -> ``il y a 3 j`` (French, coarse)."""
+
+MONTHS_FR = ("janv.", "févr.", "mars", "avr.", "mai", "juin",
+             "juil.", "août", "sept.", "oct.", "nov.", "déc.")
+
+
+def _abs_date_fr(iso):
+    """``2026-10-14T08:12:00Z`` -> ``14 oct. 2026`` (absolute, build-time).
+
+    Spec v4: the visible text is the ABSOLUTE date (never goes stale between
+    the 6h cron runs); the JS enhances it to "il y a X" at load when
+    available, reading the ``data-pushed`` ISO attribute rendered alongside.
+    """
     try:
-        dt = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc)
+        dt = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ")
     except (TypeError, ValueError):
         return None
-    secs = (datetime.now(timezone.utc) - dt).total_seconds()
-    if secs < 3600:
-        return "il y a %d min" % max(1, int(secs // 60))
-    if secs < 86400:
-        return "il y a %d h" % int(secs // 3600)
-    days = secs / 86400.0
-    if days < 31:
-        return "il y a %d j" % int(days)
-    if days < 365:
-        return "il y a %d sem" % int(days // 7)
-    if days < 730:
-        return "il y a 1 an"
-    return "il y a %d ans" % int(days // 365)
+    return "%d %s %d" % (dt.day, MONTHS_FR[dt.month - 1], dt.year)
 
 
 def _gen_date_fr(iso_utc):
@@ -592,31 +593,50 @@ def _gen_date_fr(iso_utc):
     return dt.strftime("%d/%m/%Y à %H:%M UTC")
 
 
+# Pastille tones (daisyUI 4.12 badge-soft-* variants), assigned
+# deterministically from the topic name so a topic keeps its hue across
+# builds (sum of bytes mod palette size — no RNG, no persistence).
+TOPIC_TONES = ("badge-soft-info", "badge-soft-success", "badge-soft-warning",
+               "badge-soft-error", "badge-soft")
+
+
+def _tone_for(topic):
+    """One of TOPIC_TONES for a topic name (deterministic hue rotation)."""
+    return TOPIC_TONES[sum(topic.encode("utf-8")) % len(TOPIC_TONES)]
+
+
 # --- rendering ---------------------------------------------------------------
 
 
 def _render_card(c):
-    """Return the <article> for one catalog entry ``c`` (spec v3 layout).
+    """Return the <article> for one catalog entry ``c`` (spec v4 layout).
 
     Hierarchy: the human description is the primary line (line-clamp-2);
     the repo name is a small monospace secondary line (fallback: with no
-    description, the name becomes the primary line). Badges are the repo's
-    actual GitHub topics verbatim, minus area-* (the card colour is the
-    category signal).
+    description, the name becomes the primary line). Topics are rendered as
+    soft rounded pastilles (badge badge-soft rounded-full, deterministic
+    hue), area-* omitted (the card colour is the category signal). Footer
+    button order: ``Stable`` (solid success, only with a v* tag) BEFORE
+    ``Latest`` (solid info), ``Source`` (public only), ``⎇ Branches ▾``.
+    The date line carries ``data-pushed`` (ISO) + the absolute short date.
     """
     cat = c["category"]
     muted = " opacity-60" if c["status"] in STATUS_MUTED else ""
     esc_name = html.escape(c["name"])
     esc_desc = html.escape(c["description"] or "")
     esc_topics = html.escape(" ".join(c["topics"]), quote=True)
+    # Search haystack (name + description, lowercased): the JS filters on
+    # this plain attribute -> no JSON-in-attribute quoting bug class.
+    esc_search = html.escape(
+        (c["name"] + " " + (c["description"] or "")).lower(), quote=True)
     parts = [
-        '<article data-area="%s" data-topics="%s" class="card card-hover %s '
-        'card-border rounded-xl%s">'
-        % (cat, esc_topics, CATEGORY_CARD[cat], muted),
+        '<article data-area="%s" data-topics="%s" data-search="%s" '
+        'class="card card-hover %s card-border rounded-xl%s">'
+        % (cat, esc_topics, esc_search, CATEGORY_CARD[cat], muted),
         '<div class="card-body p-4 gap-0">',
     ]
     # Primary line links to the site: ``stable/`` when the repo has a v* tag
-    # (same condition as the Site · Stable button), ``develop/`` otherwise.
+    # (same condition as the Stable button), ``develop/`` otherwise.
     primary_url = "%s/%s/%s/" % (
         SITE_BASE, c["name"], "stable" if c["latest_vtag"] else "develop")
     if esc_desc:
@@ -633,39 +653,38 @@ def _render_card(c):
             '<a href="%s" target="_blank" rel="noopener" '
             'class="text-base font-semibold hover:underline break-all">'
             '%s</a>' % (primary_url, esc_name))
-    # Topic badges: actual GitHub topics verbatim (no synthetic labels).
-    badges = [t for t in c["topics"]
-              if not t.startswith(BADGE_EXCLUDED_PREFIXES)]
-    if badges:
+    # Topic pastilles: actual GitHub topics verbatim (no synthetic labels),
+    # minus area-*, as soft rounded badges with a deterministic hue.
+    pills = [t for t in c["topics"]
+             if not t.startswith(BADGE_EXCLUDED_PREFIXES)]
+    if pills:
         parts.append(
             '<div class="mt-3 flex flex-wrap gap-1">%s</div>'
-            % "".join('<span class="badge badge-outline badge-sm font-mono">'
-                      '%s</span>' % html.escape(t) for t in badges))
+            % "".join('<span class="badge %s badge-sm rounded-full '
+                      'font-mono">%s</span>'
+                      % (_tone_for(t), html.escape(t)) for t in pills))
 
-    # Footer buttons (daisyUI btn btn-xs). Latest (the former Site · Develop,
-    # label renamed per user spec; target unchanged) on every card — all
-    # three categories are Quarto render-callers.
-    links = [
-        '<a class="btn btn-xs" href="%s/%s/develop/" target="_blank" '
-        'rel="noopener">Latest</a>' % (SITE_BASE, c["name"]),
-    ]
-    # Site · Stable points at the canonical ``stable/`` pointer path
-    # (written by the deploy-static job of _quarto-utils v1.3.23+ on v* tag
-    # deploys) instead of a per-tag releases/<v>/ URL: one stable address.
-    # The button only appears when the repo actually has a v* tag; repos
-    # whose last tag-deploy predates the v1.3.23 rollout have no server-side
-    # stable/ dir -> dead-link risk accepted per user spec.
+    # Footer buttons. Stable FIRST (spec v4), solid btn-success, only when
+    # the repo has a v* tag; points at the canonical ``stable/`` pointer
+    # path written by the deploy-static job (v1.3.23+) on v* tag deploys.
+    links = []
     if c["latest_vtag"]:
         links.append(
-            '<a class="btn btn-xs btn-success" title="Dernière version : %s" '
-            'href="%s/%s/stable/" target="_blank" rel="noopener">'
-            '★ Site · Stable</a>'
+            '<a class="btn btn-xs btn-success shadow-sm" '
+            'title="Dernière version : %s" href="%s/%s/stable/" '
+            'target="_blank" rel="noopener">★ Stable</a>'
             % (html.escape(c["latest_vtag"]), SITE_BASE, c["name"]))
+    # Latest = the develop render (every card: all three categories are
+    # Quarto render-callers). Solid btn-info so it reads as a real button.
+    links.append(
+        '<a class="btn btn-xs btn-info shadow-sm" href="%s/%s/develop/" '
+        'target="_blank" rel="noopener">Latest</a>'
+        % (SITE_BASE, c["name"]))
     # Source only for public repos (user requirement, spec v3 item 6).
     if not c["private"]:
         links.append(
-            '<a class="btn btn-xs btn-outline" href="%s" target="_blank" '
-            'rel="noopener">↗ Source</a>' % c["github_url"])
+            '<a class="btn btn-xs btn-outline shadow-sm" href="%s" '
+            'target="_blank" rel="noopener">↗ Source</a>' % c["github_url"])
     # ⎇ Branches: daisyUI hover dropdown of the non-default branches, each
     # linking the previews/<sanitized>/ path (branch "/" -> "-"). Hidden
     # when the fetch failed or the repo has no non-default branch.
@@ -684,22 +703,26 @@ def _render_card(c):
             '<ul tabindex="0" class="dropdown-content z-30 menu p-2 '
             'shadow-lg bg-base-100 border border-base-300 rounded-box '
             'w-56 max-h-64 overflow-y-auto">%s</ul></div>' % items)
-    updated = ("Mis à jour %s" % c["updated"]) if c["updated"] else ""
     parts.append(
         '<footer class="card-actions mt-4 justify-start">%s</footer>'
         % "".join(links))
-    if updated:
+    # Date: absolute short French date visible (accurate at any read time);
+    # data-pushed ISO lets the JS rewrite it to "il y a X" when available.
+    abs_date = _abs_date_fr(c["pushed_at"])
+    if abs_date:
         parts.append(
-            '<div class="mt-2 text-[11px] opacity-60">%s</div>' % updated)
+            '<div class="mt-2 text-[11px] opacity-60" data-pushed="%s">'
+            'Mis à jour %s</div>'
+            % (html.escape(c["pushed_at"], quote=True), html.escape(abs_date)))
     parts.append("</div></article>")
     return "\n      ".join(parts)
 
 
 def _render_index(cards, generated_at):
-    """Return the full index.html source (Tailwind Play CDN + daisyUI)."""
+    """Return the full index.html source (Tailwind Play CDN + daisyUI 4)."""
     count = len(cards)
-    # Category filter: daisyUI join group of btn btn-sm; the selected chip
-    # is solid btn-primary (fixes the old white-on-white selected state).
+    # Category segmented control: daisyUI join; the selected chip is solid
+    # btn-primary (Tous by default).
     tally = {a: sum(1 for c in cards if c["category"] == a)
              for a in CATEGORIES}
     chip_btns = [
@@ -709,14 +732,20 @@ def _render_index(cards, generated_at):
         chip_btns.append(
             '<button data-cat="%s" class="btn btn-sm btn-ghost">'
             '%s (%d)</button>' % (a, CATEGORY_LABELS[a], tally[a]))
-    # Topic multi-select: every actual topic present on the displayed set
-    # except area-* (carried by the category). AND semantics, client-side.
-    all_topics = sorted({t for c in cards for t in c["topics"]
-                         if not t.startswith(BADGE_EXCLUDED_PREFIXES)})
-    topic_btns = [
-        '<button data-topic-toggle="%s" class="badge badge-outline badge-lg '
-        'font-mono h-auto py-1 cursor-pointer">%s</button>'
-        % (html.escape(t), html.escape(t)) for t in all_topics]
+    # Topic filter: ALL non-area-* topics as real checkboxes in a daisy
+    # dropdown, sorted by frequency (most used first), with per-topic counts.
+    freq = {}
+    for c in cards:
+        for t in c["topics"]:
+            if not t.startswith(BADGE_EXCLUDED_PREFIXES):
+                freq[t] = freq.get(t, 0) + 1
+    all_topics = sorted(freq, key=lambda t: (-freq[t], t))
+    topic_items = "".join(
+        '<li><label class="dropdown-item text-xs font-mono gap-2">'
+        '<input type="checkbox" class="checkbox checkbox-xs" '
+        'data-topic="%s">%s <span class="ml-auto opacity-50">%d</span>'
+        '</label></li>' % (html.escape(t), html.escape(t), freq[t])
+        for t in all_topics)
     grid = "\n      ".join(_render_card(c) for c in cards)
     return """<!DOCTYPE html>
 <html lang="fr" data-theme="corporate">
@@ -724,10 +753,11 @@ def _render_index(cards, generated_at):
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Supports pédagogiques · Emmanuel BRUNO</title>
-  <!-- Tailwind Play CDN + pinned daisyUI 4 (zero-build static page,
-       regenerated by the catalog workflow). -->
+  <!-- Tailwind Play CDN + daisyUI 4.12.24 dist/full.min.css (the official
+       CDN pairing; the package has NO root daisyui.css — that 404 was the
+       v3 bug). Zero-build static page, regenerated by the catalog workflow. -->
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.24/dist/full.min.css" rel="stylesheet" type="text/css">
   <script src="https://cdn.tailwindcss.com"></script>
-  <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.24/daisyui.css" rel="stylesheet" type="text/css">
 </head>
 <body class="min-h-screen bg-base-100 text-base-content antialiased">
   <header class="max-w-7xl mx-auto px-4 pt-10 pb-4 flex flex-wrap items-start justify-between gap-4">
@@ -737,18 +767,26 @@ def _render_index(cards, generated_at):
     </div>
     <a class="btn btn-outline btn-sm mt-1 whitespace-nowrap" href="mailto:emmanuel.bruno@univ-tln.fr">✉ emmanuel.bruno@univ-tln.fr</a>
   </header>
-  <nav aria-label="Filtres" id="filters"
-       class="max-w-7xl mx-auto px-4 pb-2 flex flex-wrap items-center gap-3">
-    <div class="join" role="group" aria-label="Catégorie">
-      %s
-    </div>
-    <details class="relative">
-      <summary class="btn btn-sm btn-ghost">Thèmes ▾</summary>
-      <div class="absolute left-0 top-full z-30 mt-1 max-w-3xl rounded-box border border-base-300 bg-base-100 p-3 shadow-lg flex flex-wrap items-center gap-1.5">
-        %s
-        <button id="clear-topics" class="btn btn-xs btn-outline ml-2">Effacer</button>
+  <nav aria-label="Filtres" id="filters" class="sticky top-0 z-40 max-w-7xl mx-auto px-4 py-2">
+    <div class="card card-compact bg-base-100 border border-base-300 shadow-sm">
+      <div class="card-body flex-row flex-wrap items-center gap-3 p-3">
+        <input id="f-search" type="search" placeholder="Rechercher un support…"
+               class="input input-sm input-bordered w-56" aria-label="Rechercher">
+        <div class="join" role="group" aria-label="Catégorie">
+          %s
+        </div>
+        <div class="ml-auto flex items-center gap-2">
+          <span id="result-count" class="badge badge-soft badge-sm font-mono">%d/%d</span>
+          <div class="dropdown dropdown-end">
+            <label tabindex="0" class="btn btn-sm btn-ghost">Thèmes (<span id="topic-sel-count">0</span>) ▾</label>
+            <ul tabindex="0" class="dropdown-content menu p-2 shadow-lg bg-base-100 border border-base-300 rounded-box w-64 max-h-64 overflow-y-auto z-40">
+              %s
+            </ul>
+          </div>
+          <button id="f-reset" class="btn btn-sm btn-ghost">Réinitialiser</button>
+        </div>
       </div>
-    </details>
+    </div>
   </nav>
   <main class="max-w-7xl mx-auto px-4 py-6">
     <div id="grid"
@@ -763,44 +801,77 @@ def _render_index(cards, generated_at):
     <span>Contact : <a class="link" href="mailto:emmanuel.bruno@univ-tln.fr">emmanuel.bruno@univ-tln.fr</a></span>
   </footer>
   <script>
-    // Filtres : catégorie (groupe exclusif) + thèmes (sémantique AND).
-    const catBtns = [...document.querySelectorAll('#filters [data-cat]')];
-    const topicBtns = [...document.querySelectorAll('[data-topic-toggle]')];
+    // Filtres v4 : recherche + catégorie (groupe exclusif) + thèmes (AND).
+    // La visibilité est pilotée par style.display (inline) et non par une
+    // classe utilitaire : un style inline résiste à toute feuille de style,
+    // y compris .card{display:flex} de daisyUI (cause de la v3 "hidden" qui
+    // ne masquait rien selon l'ordre d'injection des CSS).
     const cards = [...document.querySelectorAll('#grid article')];
-    let cat = 'all';
-    const topics = new Set();
-    function apply() {
-      cards.forEach(c => {
-        const ct = (c.dataset.topics || '').split(' ');
-        const ok = (cat === 'all' || c.dataset.area === cat)
-          && [...topics].every(t => ct.includes(t));
-        c.classList.toggle('hidden', !ok);
-      });
-      catBtns.forEach(b => {
-        const on = b.dataset.cat === cat;
-        b.classList.toggle('btn-primary', on);
-        b.classList.toggle('btn-ghost', !on);
-      });
-      topicBtns.forEach(b => {
-        const on = topics.has(b.dataset.topicToggle);
-        b.classList.toggle('badge-primary', on);
-        b.classList.toggle('badge-outline', !on);
-      });
+    const catBtns = [...document.querySelectorAll('#filters [data-cat]')];
+    const topicBoxes = [...document.querySelectorAll('#filters [data-topic]')];
+    const search = document.getElementById('f-search');
+    const countEl = document.getElementById('result-count');
+    const selCountEl = document.getElementById('topic-sel-count');
+    const total = cards.length;
+
+    // Dates : la page est livrée avec la date absolue (juste sans JS) ;
+    // si JS est disponible on la remplace par "il y a X" (jamais périmé).
+    function relFr(iso) {
+      const s = (Date.now() - new Date(iso).getTime()) / 1000;
+      if (s < 3600) return "il y a " + Math.max(1, Math.floor(s / 60)) + " min";
+      if (s < 86400) return "il y a " + Math.floor(s / 3600) + " h";
+      const d = s / 86400;
+      if (d < 31) return "il y a " + Math.floor(d) + " j";
+      if (d < 365) return "il y a " + Math.floor(d / 7) + " sem";
+      return d < 730 ? "il y a 1 an" : "il y a " + Math.floor(d / 365) + " ans";
     }
-    catBtns.forEach(b => b.addEventListener('click',
-      () => { cat = b.dataset.cat; apply(); }));
-    topicBtns.forEach(b => b.addEventListener('click', () => {
-      const t = b.dataset.topicToggle;
-      topics.has(t) ? topics.delete(t) : topics.add(t);
-      apply();
+    document.querySelectorAll('[data-pushed]').forEach(el => {
+      el.textContent = "Mis à jour " + relFr(el.dataset.pushed);
+    });
+
+    // Recalcule tout l'état visible depuis les data-attributs du DOM.
+    function applyFilters() {
+      const q = (search.value || "").trim().toLowerCase();
+      const active = catBtns.find(b => b.classList.contains('btn-primary'));
+      const cat = active ? active.dataset.cat : 'all';
+      const sel = topicBoxes.filter(b => b.checked).map(b => b.dataset.topic);
+      let visible = 0;
+      cards.forEach(c => {
+        const topics = (c.dataset.topics || "").split(" ");
+        const ok = (cat === "all" || c.dataset.area === cat)
+          && (!q || (c.dataset.search || "").includes(q))
+          && sel.every(t => topics.includes(t));
+        c.style.display = ok ? "" : "none";
+        if (ok) visible++;
+      });
+      countEl.textContent = visible + "/" + total;
+      selCountEl.textContent = String(sel.length);
+    }
+    catBtns.forEach(b => b.addEventListener("click", () => {
+      catBtns.forEach(x => {
+        x.classList.toggle("btn-primary", x === b);
+        x.classList.toggle("btn-ghost", x !== b);
+      });
+      applyFilters();
     }));
-    document.getElementById('clear-topics').addEventListener('click',
-      () => { topics.clear(); cat = 'all'; apply(); });
+    search.addEventListener("input", applyFilters);
+    topicBoxes.forEach(b => b.addEventListener("change", applyFilters));
+    document.getElementById("f-reset").addEventListener("click", () => {
+      search.value = "";
+      topicBoxes.forEach(b => { b.checked = false; });
+      catBtns.forEach(x => {
+        x.classList.toggle("btn-primary", x.dataset.cat === "all");
+        x.classList.toggle("btn-ghost", x.dataset.cat !== "all");
+      });
+      applyFilters();
+    });
   </script>
 </body>
 </html>
-""" % ("\n      ".join(chip_btns), "\n        ".join(topic_btns), grid,
+""" % ("\n          ".join(chip_btns), count, count, topic_items, grid,
        _gen_date_fr(generated_at), count)
+
+
 
 
 def _write_file(path, content):
@@ -844,7 +915,7 @@ def main():
             "status": _status_of(r),
             "ipynb": "fmt-ipynb" in (r.get("topics") or []),
             "pushed_at": r.get("pushed_at"),
-            "updated": _relative_fr(r.get("pushed_at")),
+            "updated": _abs_date_fr(r.get("pushed_at")),
             "github_url": r.get("html_url")
                           or "https://github.com/%s/%s" % (ORG, r["name"]),
         })
