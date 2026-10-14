@@ -4,24 +4,26 @@
 Scans the ``ebpro`` GitHub org (``GET /orgs/ebpro/repos``) and renders a
 self-contained static card grid of the teaching surface under ``./public/``:
 
-  * three display categories only: Notebook (``fmt-ipynb`` topic, wins over
-    the area topic), Lecture (``area-lecture`` non-ipynb) and Samples
-    (``area-sample`` plus the forced names in FORCED_SAMPLES); EVERY other
-    repo (archived, area-standard / reference / student / infra / cicd /
-    image / meta / personal, untagged) is excluded from the page entirely,
-  * card content: repo title, 2-line clamped description, category chip +
-    status chip, and a pill-button footer: ``Site · Develop``, ``Site ·
-    Stable`` (only when the repo has a ``v*`` tag), ``Source`` (GitHub) and
-    a zero-JS ``Branches ▾`` dropdown (<details>/<summary>) listing the
-    non-default branches, plus the relative last-update date.
+  * three display categories assigned by repo NAME PREFIX (spec v3):
+    ``lecture-`` -> Lecture, ``notebook-`` -> Notebook, ``sample-`` ->
+    Samples (+ FORCED_SAMPLES names); archived repos, repos carrying the
+    ``status-legacy`` topic and non-matching names are excluded entirely,
+  * card content: the human description as the primary line (2-line clamp)
+    and the repo name as a small monospace secondary line, verbatim GitHub
+    topic badges (area-* omitted; the card colour is the category signal),
+    and a daisyUI button footer: ``Site · Develop``, ``Site · Stable``
+    (only when the repo has a ``v*`` tag), ``Source`` (public repos only)
+    and a ``⎇ Branches ▾`` hover dropdown, plus the relative last-update
+    date. Filters: category join-group (solid btn-primary when selected)
+    + collapsible topic multi-select (AND semantics), vanilla JS.
 
 Branch/tag data is fetched per displayed repo (2 REST calls each,
 ThreadPool(8)); a per-repo fetch failure degrades silently to hiding the
 matching button. Site URLs are NOT probed at build time; a stale link is
 acceptable (see the stable-pointer note in _render_card).
 
-Tailwind CSS is delivered via the Play CDN in the template (see the note
-there); fonts are the system stack, no images or icons.
+Tailwind CSS is delivered via the Play CDN and daisyUI 4 via a pinned
+cssdelivr stylesheet (see the note in the template); fonts are the system stack, no images or icons.
 
 Pure Python 3 stdlib. Auth: reads ``GITHUB_TOKEN`` (required) from the
 environment. The ``cleanup`` subcommand (Cloudflare Pages preview pruning,
@@ -53,18 +55,20 @@ USER_AGENT = "ebpro-teaching-catalog"
 # of the shared Quarto render pipeline). No build-time probing (see docstring).
 SITE_BASE = "https://bruno.univ-tln.fr/teaching-material"
 
-# --- teaching surface (classification topics, ebpro org labeling) ----------
+# --- teaching surface (name-prefix classification, user spec v3) -----------
 
-# Display surface: THREE categories only (user spec). Repo -> category:
-#   notebook : fmt-ipynb topic (wins over the area topic)
-#   lecture  : area-lecture, non-ipynb
-#   sample   : area-sample + FORCED_SAMPLES
-# Everything else (area-standard / reference / student / infra / cicd /
-# image / meta / personal, untagged, archived) is excluded entirely.
+# Display surface: THREE categories, assigned by repo NAME PREFIX (v3:
+# independent of topic labelling, so topic alignment work elsewhere cannot
+# shift the surface):
+#   lecture  : name starts with "lecture-"
+#   notebook : name starts with "notebook-"
+#   sample   : name starts with "sample-" + FORCED_SAMPLES
+# Excluded: archived repos, anything carrying the ``status-legacy`` topic,
+# and every name matching none of the prefixes above.
 CATEGORIES = ("lecture", "notebook", "sample")
 
-# Repos taught as samples regardless of their area topic (user decision).
-FORCED_SAMPLES = ("conflictbot", "eye", "hellogit")
+# Repos taught as samples regardless of their name prefix (user decision).
+FORCED_SAMPLES = ("hellogit", "conflictbot")
 
 CATEGORY_LABELS = {
     "lecture": "Lecture",
@@ -72,32 +76,20 @@ CATEGORY_LABELS = {
     "sample": "Samples",
 }
 
-# Pastel card backgrounds + borders (Tailwind classes).
+# Pastel card backgrounds + borders (Tailwind classes). The card colour IS
+# the category signal (spec v3: no category chip on the cards).
 CATEGORY_CARD = {
     "lecture": "bg-sky-100 border-sky-300",
     "notebook": "bg-orange-100 border-orange-300",
     "sample": "bg-emerald-100 border-emerald-300",
 }
 
-# Category chip styles (one shade darker than the card).
-CATEGORY_CHIP = {
-    "lecture": "bg-sky-200 text-sky-900",
-    "notebook": "bg-orange-200 text-orange-900",
-    "sample": "bg-emerald-200 text-emerald-900",
-}
-
 # Statuses rendered with reduced emphasis.
 STATUS_MUTED = ("frozen", "duplicate")
 
-STATUS_LABELS = {
-    "active": "actif",
-    "partial": "partiel",
-    "stub": "ébauche",
-    # "legacy" stays literally "legacy" (user spec: do NOT translate it).
-    "legacy": "legacy",
-    "frozen": "figé",
-    "duplicate": "dupliqué",
-}
+# Topic prefixes omitted from card badges and from the topic filter:
+# area-* is redundant with the colour-coded category (spec v3 item 5).
+BADGE_EXCLUDED_PREFIXES = ("area-",)
 
 
 # --- API layer ------------------------------------------------------------
@@ -534,26 +526,25 @@ def fetch_extras(entries, workers=8):
 def _classify(repo):
     """Return the display category key for ``repo``, or None to exclude it.
 
-    Rules (user spec, evaluated in this order):
+    Rules (user spec v3, evaluated in this order):
       archived -> excluded;
-      FORCED_SAMPLES name -> ``sample`` (name wins over topics);
-      ``fmt-ipynb`` topic -> ``notebook`` (ipynb wins over area);
-      ``area-lecture`` -> ``lecture``;
-      ``area-sample`` -> ``sample``;
+      ``status-legacy`` topic -> excluded;
+      FORCED_SAMPLES name -> ``sample``;
+      name prefix ``lecture-`` / ``notebook-`` / ``sample-`` -> that category;
       anything else -> excluded.
     """
     if repo.get("archived"):
         return None
     name = (repo.get("name") or "").lower()
+    if "status-legacy" in (repo.get("topics") or []):
+        return None
     if name in FORCED_SAMPLES:
         return "sample"
-    topics = repo.get("topics") or []
-    if "fmt-ipynb" in topics:
-        return "notebook"
-    areas = {t[len("area-"):] for t in topics if t.startswith("area-")}
-    if "lecture" in areas:
+    if name.startswith("lecture-"):
         return "lecture"
-    if "sample" in areas:
+    if name.startswith("notebook-"):
+        return "notebook"
+    if name.startswith("sample-"):
         return "sample"
     return None
 
@@ -601,43 +592,52 @@ def _gen_date_fr(iso_utc):
 
 
 def _render_card(c):
-    """Return the <article> for one catalog entry ``c``."""
+    """Return the <article> for one catalog entry ``c`` (spec v3 layout).
+
+    Hierarchy: the human description is the primary line (line-clamp-2);
+    the repo name is a small monospace secondary line (fallback: with no
+    description, the name becomes the primary line). Badges are the repo's
+    actual GitHub topics verbatim, minus area-* (the card colour is the
+    category signal).
+    """
     cat = c["category"]
     muted = " opacity-60" if c["status"] in STATUS_MUTED else ""
     esc_name = html.escape(c["name"])
     esc_desc = html.escape(c["description"] or "")
+    esc_topics = html.escape(" ".join(c["topics"]), quote=True)
     parts = [
-        '<article data-area="%s" class="card %s border rounded-xl p-4 '
-        'flex flex-col%s">' % (cat, CATEGORY_CARD[cat], muted),
-        '<h3 class="font-semibold text-slate-900 leading-snug break-words">'
-        '%s</h3>' % esc_name,
-        '<p class="mt-1 text-sm text-slate-600 line-clamp-2">%s</p>'
-        % (esc_desc or "&nbsp;"),
-        '<div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] '
-        'font-medium">',
-        '<span class="px-2 py-0.5 rounded-full %s">%s</span>'
-        % (CATEGORY_CHIP[cat], CATEGORY_LABELS[cat]),
+        '<article data-area="%s" data-topics="%s" class="card card-hover %s '
+        'card-border rounded-xl%s">'
+        % (cat, esc_topics, CATEGORY_CARD[cat], muted),
+        '<div class="card-body p-4 gap-0">',
     ]
-    if c["status"]:
-        label = STATUS_LABELS.get(c["status"], html.escape(c["status"]))
+    if esc_desc:
         parts.append(
-            '<span class="px-2 py-0.5 rounded-full bg-white/70 '
-            'text-slate-700">%s</span>' % label)
-    if c["ipynb"] and cat != "notebook":
+            '<p class="text-base leading-snug line-clamp-2 break-words">'
+            '%s</p>' % esc_desc)
         parts.append(
-            '<span class="w-2 h-2 rounded-full bg-orange-300" '
-            'title="Contenu Jupyter (ipynb)"></span>')
-    parts.append("</div>")
+            '<a href="%s" target="_blank" rel="noopener" '
+            'class="mt-1 font-mono text-sm opacity-70 hover:opacity-100 '
+            'break-all">%s</a>' % (c["github_url"], esc_name))
+    else:
+        parts.append(
+            '<a href="%s" target="_blank" rel="noopener" '
+            'class="text-base font-semibold hover:underline break-all">'
+            '%s</a>' % (c["github_url"], esc_name))
+    # Topic badges: actual GitHub topics verbatim (no synthetic labels).
+    badges = [t for t in c["topics"]
+              if not t.startswith(BADGE_EXCLUDED_PREFIXES)]
+    if badges:
+        parts.append(
+            '<div class="mt-3 flex flex-wrap gap-1">%s</div>'
+            % "".join('<span class="badge badge-outline badge-sm font-mono">'
+                      '%s</span>' % html.escape(t) for t in badges))
 
-    # Pill buttons (spec tints: Develop sky, Stable emerald, Source violet,
-    # Branches amber). All three displayed categories are Quarto
-    # render-callers, so Site · Develop appears on every card.
-    btn = ("inline-flex items-center gap-1 px-2.5 py-1 rounded-full "
-           "text-[11px] font-medium border no-underline")
+    # Footer buttons (daisyUI btn btn-xs). Site · Develop on every card
+    # (all three categories are Quarto render-callers).
     links = [
-        '<a class="%s bg-sky-200/70 border-sky-300 text-sky-900 '
-        'hover:bg-sky-200" href="%s/%s/develop/" target="_blank" '
-        'rel="noopener">↗ Site · Develop</a>' % (btn, SITE_BASE, c["name"]),
+        '<a class="btn btn-xs" href="%s/%s/develop/" target="_blank" '
+        'rel="noopener">↗ Site · Develop</a>' % (SITE_BASE, c["name"]),
     ]
     # Site · Stable points at the canonical ``stable/`` pointer path
     # (written by the deploy-static job of _quarto-utils v1.3.23+ on v* tag
@@ -647,85 +647,98 @@ def _render_card(c):
     # stable/ dir -> dead-link risk accepted per user spec.
     if c["latest_vtag"]:
         links.append(
-            '<a class="%s bg-emerald-200/70 border-emerald-300 '
-            'text-emerald-900 hover:bg-emerald-200" title="Dernière '
-            'version : %s" href="%s/%s/stable/" target="_blank" '
-            'rel="noopener">★ Site · Stable</a>'
-            % (btn, html.escape(c["latest_vtag"]), SITE_BASE, c["name"]))
-    links.append(
-        '<a class="%s bg-violet-200/70 border-violet-300 text-violet-900 '
-        'hover:bg-violet-200" href="%s" target="_blank" '
-        'rel="noopener">↗ Source</a>' % (btn, c["github_url"]))
-    # Branches ▾: zero-JS <details> dropdown of the non-default branches,
-    # each linking the previews/<sanitized>/ path (branch "/" -> "-").
-    # Hidden when the fetch failed or the repo has no non-default branch.
+            '<a class="btn btn-xs btn-success" title="Dernière version : %s" '
+            'href="%s/%s/stable/" target="_blank" rel="noopener">'
+            '★ Site · Stable</a>'
+            % (html.escape(c["latest_vtag"]), SITE_BASE, c["name"]))
+    # Source only for public repos (user requirement, spec v3 item 6).
+    if not c["private"]:
+        links.append(
+            '<a class="btn btn-xs btn-outline" href="%s" target="_blank" '
+            'rel="noopener">↗ Source</a>' % c["github_url"])
+    # ⎇ Branches: daisyUI hover dropdown of the non-default branches, each
+    # linking the previews/<sanitized>/ path (branch "/" -> "-"). Hidden
+    # when the fetch failed or the repo has no non-default branch.
     if c["branches"]:
         items = "".join(
-            '<a class="block px-3 py-1 text-xs text-slate-700 '
-            'hover:bg-amber-50 no-underline whitespace-nowrap" '
-            'href="%s/%s/previews/%s/" target="_blank" '
-            'rel="noopener">⎇ %s</a>'
-            % (SITE_BASE, c["name"],
-               html.escape(b.replace("/", "-")), html.escape(b))
+            '<li><a class="text-xs whitespace-nowrap" '
+            'href="%s/%s/previews/%s/" target="_blank" rel="noopener">'
+            '⎇ %s</a></li>'
+            % (SITE_BASE, c["name"], html.escape(b.replace("/", "-")),
+               html.escape(b))
             for b in c["branches"])
         links.append(
-            '<details class="relative"><summary class="%s bg-amber-200/70 '
-            'border-amber-300 text-amber-900 hover:bg-amber-200 '
-            'cursor-pointer select-none">⎇ Branches ▾</summary>'
-            '<div class="absolute left-0 bottom-full z-20 mb-1 max-h-64 '
-            'overflow-y-auto w-max bg-white border border-amber-300 '
-            'rounded-lg shadow-lg">%s</div></details>' % (btn, items))
+            '<div class="dropdown dropdown-end dropdown-hover">'
+            '<div tabindex="0" role="button" class="btn btn-xs">'
+            '⎇ Branches ▾</div>'
+            '<ul tabindex="0" class="dropdown-content z-30 menu p-2 '
+            'shadow-lg bg-base-100 border border-base-300 rounded-box '
+            'w-56 max-h-64 overflow-y-auto">%s</ul></div>' % items)
     updated = ("Mis à jour %s" % c["updated"]) if c["updated"] else ""
     parts.append(
-        '<footer class="mt-auto pt-3">'
-        '<div class="flex flex-wrap items-center gap-1.5">%s</div>'
-        '<div class="mt-2 text-[11px] text-slate-500">%s</div>'
-        "</footer>" % ("".join(links), updated))
-    parts.append("</article>")
+        '<footer class="card-actions mt-4 justify-start">%s</footer>'
+        % "".join(links))
+    if updated:
+        parts.append(
+            '<div class="mt-2 text-[11px] opacity-60">%s</div>' % updated)
+    parts.append("</div></article>")
     return "\n      ".join(parts)
 
 
 def _render_index(cards, generated_at):
-    """Return the full index.html source (Tailwind Play CDN delivery)."""
+    """Return the full index.html source (Tailwind Play CDN + daisyUI)."""
     count = len(cards)
-    # Filter chips: exactly "Tous · Lecture · Notebook · Samples" (user spec),
-    # with live counts per category.
+    # Category filter: daisyUI join group of btn btn-sm; the selected chip
+    # is solid btn-primary (fixes the old white-on-white selected state).
     tally = {a: sum(1 for c in cards if c["category"] == a)
              for a in CATEGORIES}
     chip_btns = [
-        '<button data-filter="all" class="px-3 py-1 rounded-full text-sm '
-        'bg-slate-800 text-white ring-2 ring-slate-800">Tous (%d)</button>'
-        % count]
+        '<button data-cat="all" class="btn btn-sm btn-primary">'
+        'Tous (%d)</button>' % count]
     for a in CATEGORIES:
         chip_btns.append(
-            '<button data-filter="%s" class="px-3 py-1 rounded-full text-sm '
-            'bg-white border border-slate-300 text-slate-700 '
-            'hover:bg-slate-100">%s (%d)</button>'
-            % (a, CATEGORY_LABELS[a], tally[a]))
+            '<button data-cat="%s" class="btn btn-sm btn-ghost">'
+            '%s (%d)</button>' % (a, CATEGORY_LABELS[a], tally[a]))
+    # Topic multi-select: every actual topic present on the displayed set
+    # except area-* (carried by the category). AND semantics, client-side.
+    all_topics = sorted({t for c in cards for t in c["topics"]
+                         if not t.startswith(BADGE_EXCLUDED_PREFIXES)})
+    topic_btns = [
+        '<button data-topic-toggle="%s" class="badge badge-outline badge-lg '
+        'font-mono h-auto py-1 cursor-pointer">%s</button>'
+        % (html.escape(t), html.escape(t)) for t in all_topics]
     grid = "\n      ".join(_render_card(c) for c in cards)
     return """<!DOCTYPE html>
-<html lang="fr">
+<html lang="fr" data-theme="corporate">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Supports pédagogiques · Catalogue ebpro</title>
-  <!-- Tailwind Play CDN (v1 pragmatique : page statique régénérée par cron).
-       Swap to compiled CSS when a build step lands. -->
+  <title>Supports pédagogiques · Emmanuel BRUNO</title>
+  <!-- Tailwind Play CDN + pinned daisyUI 4 (zero-build static page,
+       regenerated by the catalog workflow). -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <style>summary::-webkit-details-marker { display: none; }</style>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.24/daisyui.css" rel="stylesheet" type="text/css">
 </head>
-<body class="bg-slate-50 text-slate-800 antialiased">
-  <header class="max-w-7xl mx-auto px-4 pt-10 pb-4">
-    <h1 class="text-3xl font-semibold tracking-tight text-slate-900">
-      Supports pédagogiques</h1>
-    <p class="mt-1 text-slate-500">Catalogue ebpro</p>
-    <p class="mt-1 text-sm text-slate-400">%d supports</p>
+<body class="min-h-screen bg-base-100 text-base-content antialiased">
+  <header class="max-w-7xl mx-auto px-4 pt-10 pb-4 flex flex-wrap items-start justify-between gap-4">
+    <div class="max-w-3xl">
+      <h1 class="text-3xl font-bold tracking-tight">Supports pédagogiques d’Emmanuel BRUNO</h1>
+      <p class="mt-2 text-base opacity-70">Des cours complets (lecture), des modules indépendants (notebook) et des exemples (samples).</p>
+    </div>
+    <a class="btn btn-outline btn-sm mt-1 whitespace-nowrap" href="mailto:emmanuel.bruno@univ-tln.fr">✉ emmanuel.bruno@univ-tln.fr</a>
   </header>
   <nav aria-label="Filtres" id="filters"
-       class="max-w-7xl mx-auto px-4 pb-2 flex flex-wrap items-center gap-2">
-    <span class="text-xs uppercase tracking-wide text-slate-400 mr-1"
-          >Filtres</span>
-    %s
+       class="max-w-7xl mx-auto px-4 pb-2 flex flex-wrap items-center gap-3">
+    <div class="join" role="group" aria-label="Catégorie">
+      %s
+    </div>
+    <details class="relative">
+      <summary class="btn btn-sm btn-ghost">Thèmes ▾</summary>
+      <div class="absolute left-0 top-full z-30 mt-1 max-w-3xl rounded-box border border-base-300 bg-base-100 p-3 shadow-lg flex flex-wrap items-center gap-1.5">
+        %s
+        <button id="clear-topics" class="btn btn-xs btn-outline ml-2">Effacer</button>
+      </div>
+    </details>
   </nav>
   <main class="max-w-7xl mx-auto px-4 py-6">
     <div id="grid"
@@ -733,30 +746,50 @@ def _render_index(cards, generated_at):
       %s
     </div>
   </main>
-  <footer class="max-w-7xl mx-auto px-4 pb-10 text-xs text-slate-400">
-    Généré le %s · %d dépôts · source :
-    <a class="underline" href="https://github.com/ebpro/teaching-catalog"
-       >teaching-catalog</a>
+  <footer class="max-w-7xl mx-auto px-4 pb-10 text-xs opacity-60 flex flex-wrap items-center gap-x-4 gap-y-1">
+    <span>Généré le %s</span>
+    <span>%d dépôts</span>
+    <span>source : <a class="link" href="https://github.com/ebpro/teaching-catalog">teaching-catalog</a></span>
+    <span>Contact : <a class="link" href="mailto:emmanuel.bruno@univ-tln.fr">emmanuel.bruno@univ-tln.fr</a></span>
   </footer>
   <script>
-    // Filtres par catégorie, bascule client-side sans dépendance.
-    const buttons = document.querySelectorAll('#filters button');
-    const cards = document.querySelectorAll('#grid .card');
-    buttons.forEach(btn => btn.addEventListener('click', () => {
-      const f = btn.dataset.filter;
-      buttons.forEach(b => {
-        const on = b === btn;
-        b.classList.toggle('ring-2', on);
-        b.classList.toggle('bg-slate-800', on);
-        b.classList.toggle('text-white', on);
+    // Filtres : catégorie (groupe exclusif) + thèmes (sémantique AND).
+    const catBtns = [...document.querySelectorAll('#filters [data-cat]')];
+    const topicBtns = [...document.querySelectorAll('[data-topic-toggle]')];
+    const cards = [...document.querySelectorAll('#grid article')];
+    let cat = 'all';
+    const topics = new Set();
+    function apply() {
+      cards.forEach(c => {
+        const ct = (c.dataset.topics || '').split(' ');
+        const ok = (cat === 'all' || c.dataset.area === cat)
+          && [...topics].every(t => ct.includes(t));
+        c.classList.toggle('hidden', !ok);
       });
-      cards.forEach(c =>
-        c.classList.toggle('hidden', f !== 'all' && c.dataset.area !== f));
+      catBtns.forEach(b => {
+        const on = b.dataset.cat === cat;
+        b.classList.toggle('btn-primary', on);
+        b.classList.toggle('btn-ghost', !on);
+      });
+      topicBtns.forEach(b => {
+        const on = topics.has(b.dataset.topicToggle);
+        b.classList.toggle('badge-primary', on);
+        b.classList.toggle('badge-outline', !on);
+      });
+    }
+    catBtns.forEach(b => b.addEventListener('click',
+      () => { cat = b.dataset.cat; apply(); }));
+    topicBtns.forEach(b => b.addEventListener('click', () => {
+      const t = b.dataset.topicToggle;
+      topics.has(t) ? topics.delete(t) : topics.add(t);
+      apply();
     }));
+    document.getElementById('clear-topics').addEventListener('click',
+      () => { topics.clear(); cat = 'all'; apply(); });
   </script>
 </body>
 </html>
-""" % (count, "\n    ".join(chip_btns), grid,
+""" % ("\n      ".join(chip_btns), "\n        ".join(topic_btns), grid,
        _gen_date_fr(generated_at), count)
 
 
@@ -797,6 +830,7 @@ def main():
             "topics": r.get("topics") or [],
             "category": cat,
             "default_branch": r.get("default_branch"),
+            "private": bool(r.get("private")),
             "status": _status_of(r),
             "ipynb": "fmt-ipynb" in (r.get("topics") or []),
             "pushed_at": r.get("pushed_at"),
