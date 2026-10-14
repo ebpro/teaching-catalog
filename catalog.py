@@ -1,42 +1,34 @@
 #!/usr/bin/env python3
 """teaching-catalog generator.
 
-Scans every ``notebook-*`` / ``lecture-*`` / ``sample-*`` / ``demo-*``
-repository in the ``ebpro`` GitHub org and, for each one, assembles a
-consistent, informative card:
+Scans the ``ebpro`` GitHub org (``GET /orgs/ebpro/repos``) and renders a
+self-contained static card grid of the teaching surface under ``./public/``:
 
-  * a type icon (lecture / notebook / sample / demo)
-  * the repo name (linked to GitHub) and its topic badges
-  * the description
-  * a links section with, for every repo:
-      - Stable  -> the GitHub Pages site (when Pages is enabled)
-      - develop -> the latest Cloudflare Pages preview deployment
-      - features-> the Cloudflare Pages preview of every other branch
-      - CI      -> the latest GitHub Actions run
+  * one pastel card per repo tagged area-lecture / area-sample /
+    area-standard / area-reference / area-student (plus anything tagged
+    ``fmt-ipynb`` that carries no teaching area),
+  * archived repos and the non-teaching areas (infra / cicd / image /
+    meta / personal) are excluded,
+  * card content: repo title, 2-line clamped description, one area chip +
+    one status chip, and a footer with Site (render-callers only), Source
+    (GitHub) and the relative last-update date.
 
-Each Cloudflare Pages link carries the same deployment info the Pages
-dashboard shows: environment, source branch, commit (short sha) and status.
+The published-site links are generated per area WITHOUT probing the URLs at
+build time (too slow / flaky for a cron job); a stale link is acceptable.
 
-Renders a self-contained static ``index.html`` plus a machine-readable
-``manifest.json`` under ``./public/``.
+Tailwind CSS is delivered via the Play CDN in the template (see the note
+there); fonts are the system stack, no images or icons.
 
-Pure Python 3 stdlib. No third-party dependencies. Network calls are the GitHub
-GraphQL API (bulk repo metadata: trunk head, branches, topics, description) plus
-the GitHub REST API (Pages / CI / README, which have no GraphQL equivalent) and,
-when ``CF_API_TOKEN`` is set, the Cloudflare Pages API (best-effort: a CF failure
-never breaks the catalog). No threads (all calls are strictly sequential so the
-rate limit is respected).
-
-Auth: reads ``GITHUB_TOKEN`` (required) and ``CF_API_TOKEN`` (optional) from the
-environment.
+Pure Python 3 stdlib. Auth: reads ``GITHUB_TOKEN`` (required) from the
+environment. The ``cleanup`` subcommand (Cloudflare Pages preview pruning,
+kept for ``.github/workflows/cleanup.yml``) additionally reads
+``CF_API_TOKEN`` and is unaffected by the catalog rendering path above.
 """
 
 import argparse
-import base64
 import html
 import json
 import os
-import re
 import sys
 import time
 import urllib.error
@@ -46,23 +38,64 @@ from datetime import datetime, timezone
 # --- configuration --------------------------------------------------------
 
 ORG = "ebpro"
-PREFIXES = ("notebook-", "lecture-", "sample-", "demo-")
 API = "https://api.github.com"
-GRAPHQL_API = "https://api.github.com/graphql"
 OUT_DIR = "public"
 USER_AGENT = "ebpro-teaching-catalog"
-GITHUB_IO_BASE = "https://ebpro.github.io"
 
-PHILOSOPHY = (
-    "This catalog presents a collection of interactive teaching materials "
-    "\u2014 notebooks, lectures, samples, and demos \u2014 designed around a "
-    "philosophy of learning by doing. Each course is a living repository "
-    "where students clone, run, and modify real code. Continuous integration "
-    "ensures every example is always up-to-date and working, so learners "
-    "never start from a broken state. The system emphasizes practical "
-    "skills: version control, containerization, and modern development "
-    "workflows are not just taught but practiced from day one."
-)
+# Base under which the rendered course sites are published (deploy-static job
+# of the shared Quarto render pipeline). No build-time probing (see docstring).
+SITE_BASE = "https://bruno.univ-tln.fr/teaching-material"
+
+# --- teaching surface (classification topics, ebpro org labeling) ----------
+
+INCLUDE_AREAS = ("lecture", "sample", "standard", "reference", "student")
+EXCLUDE_AREAS = ("infra", "cicd", "image", "meta", "personal")
+# Areas whose repos are Quarto render-callers -> get a "Site" link.
+RENDER_CALLER_AREAS = ("lecture", "sample", "standard")
+# Pseudo-area for fmt-ipynb repos without a teaching area tag.
+IPYNB_AREA = "ipynb"
+
+AREA_LABELS = {
+    "lecture": "Lecture",
+    "sample": "Samples",
+    "standard": "Standards",
+    "reference": "Références",
+    "student": "Étudiants",
+    IPYNB_AREA: "Notebooks",
+}
+
+# Pastel card backgrounds + borders (Tailwind classes).
+AREA_CARD = {
+    "lecture": "bg-sky-100 border-sky-300",
+    "sample": "bg-emerald-100 border-emerald-300",
+    "standard": "bg-amber-100 border-amber-300",
+    "reference": "bg-violet-100 border-violet-300",
+    "student": "bg-rose-100 border-rose-300",
+    IPYNB_AREA: "bg-orange-100 border-orange-300",
+}
+
+# Area chip styles (one shade darker than the card).
+AREA_CHIP = {
+    "lecture": "bg-sky-200 text-sky-900",
+    "sample": "bg-emerald-200 text-emerald-900",
+    "standard": "bg-amber-200 text-amber-900",
+    "reference": "bg-violet-200 text-violet-900",
+    "student": "bg-rose-200 text-rose-900",
+    IPYNB_AREA: "bg-orange-200 text-orange-900",
+}
+
+# Statuses rendered with reduced emphasis.
+STATUS_MUTED = ("frozen", "duplicate")
+
+STATUS_LABELS = {
+    "active": "actif",
+    "partial": "partiel",
+    "stub": "ébauche",
+    "legacy": "héritage",
+    "frozen": "figé",
+    "duplicate": "dupliqué",
+}
+
 
 # --- API layer ------------------------------------------------------------
 
@@ -198,158 +231,6 @@ def _request(url, none_on=(), attempts=_MAX_ATTEMPTS):
     raise RuntimeError("Gave up on %s after %d attempts: %s"
                        % (url, attempts, last_err))
 
-
-# --- GraphQL bulk fetch ----------------------------------------------------
-#
-# The org has ~160 repos. Fetching trunk head, branch list, topics and
-# description one REST call at a time means ~5 calls per repo (~430 total).
-# GraphQL pulls all of that in a handful of paginated queries (one per 50
-# repos), collapsing the bulk into ~4 queries. Pages / CI / README have no
-# GraphQL equivalent and still go through the REST _request() path above.
-
-_graphql_call_count = 0
-
-
-def _graphql_query(query, variables=None, attempts=_MAX_ATTEMPTS):
-    """POST ``query`` to the GitHub GraphQL API and return the ``data`` object.
-
-    Retries with backoff on transient failures (HTTP 403/429 rate limit, or a
-    network blip), mirroring ``_request``. On final failure returns ``{}`` so a
-    single bad page degrades to "no more data" rather than crashing the run;
-    every error is logged to stderr. Uses the same ``TOKEN`` global as REST.
-    """
-    _pace()
-    global _graphql_call_count
-    last_err = None
-    for attempt in range(1, attempts + 1):
-        _graphql_call_count += 1
-        payload = json.dumps(
-            {"query": query, "variables": variables or {}}).encode()
-        req = urllib.request.Request(
-            GRAPHQL_API,
-            data=payload,
-            headers={
-                "Authorization": "Bearer " + TOKEN,
-                "Content-Type": "application/json",
-                "Accept": "application/vnd.github+json",
-                "User-Agent": USER_AGENT,
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read())
-            if not isinstance(data, dict):
-                return {}
-            if "errors" in data:
-                sys.stderr.write("GraphQL errors: %s\n" % (data["errors"],))
-            return data.get("data") or {}
-        except urllib.error.HTTPError as e:
-            body = ""
-            try:
-                body = e.read().decode("utf-8", "replace")
-            except Exception:
-                pass
-            if e.code in _RETRYABLE_HTTP and attempt < attempts:
-                delay = _BACKOFFS[min(attempt - 1, len(_BACKOFFS) - 1)]
-                sys.stderr.write("GraphQL: HTTP %d - sleeping %ds "
-                                 "(attempt %d/%d)\n"
-                                 % (e.code, delay, attempt, attempts))
-                time.sleep(delay)
-                last_err = e
-                continue
-            sys.stderr.write("GraphQL HTTP %d: %s\n" % (e.code, body[:300]))
-            return {}
-        except (urllib.error.URLError, OSError) as e:
-            last_err = e
-            if attempt < attempts:
-                delay = _BACKOFFS[min(attempt - 1, len(_BACKOFFS) - 1)]
-                sys.stderr.write("GraphQL: network error (%r) - sleeping %ds "
-                                 "(attempt %d/%d)\n"
-                                 % (e, delay, attempt, attempts))
-                time.sleep(delay)
-                continue
-            sys.stderr.write("GraphQL: gave up after %d attempts: %r\n"
-                             % (attempts, last_err))
-            return {}
-    return {}
-
-
-def fetch_repos_graphql():
-    """Fetch every org repo + its metadata in a few paginated GraphQL queries.
-
-    Returns a list of dicts, one per repo, with keys:
-
-      name, description, pushed_at, is_archived, visibility,
-      default_branch, last_commit_date, last_commit_sha,
-      branches (list of names, including the default branch),
-      topics (list of names)
-
-    ``default_branch`` falls back to ``"main"`` when the repo has no commits
-    yet (``defaultBranchRef`` is null). Callers filter the default branch out
-    of ``branches`` if they want non-default only.
-    """
-    all_repos = []
-    cursor = None
-    query = """
-    query GetRepos($login: String!, $cursor: String) {
-      rateLimit { cost remaining resetAt }
-      organization(login: $login) {
-        repositories(first: 50, after: $cursor,
-                     orderBy: {field: NAME, direction: ASC}) {
-          pageInfo { hasNextPage endCursor }
-          nodes {
-            name
-            description
-            pushedAt
-            isArchived
-            visibility
-            defaultBranchRef {
-              name
-              target { ... on Commit { committedDate oid } }
-            }
-            refs(refPrefix: "refs/heads/", first: 30) { nodes { name } }
-            repositoryTopics(first: 20) { nodes { topic { name } } }
-          }
-        }
-      }
-    }
-    """
-    while True:
-        data = _graphql_query(query, {"login": ORG, "cursor": cursor})
-        org_data = data.get("organization") or {}
-        repos_data = org_data.get("repositories") or {}
-        nodes = repos_data.get("nodes") or []
-        for node in nodes:
-            ref = node.get("defaultBranchRef") or {}
-            target = ref.get("target") or {}
-            all_repos.append({
-                "name": node["name"],
-                "description": node.get("description"),
-                "pushed_at": node.get("pushedAt"),
-                "is_archived": node.get("isArchived", False),
-                "visibility": node.get("visibility", "PRIVATE"),
-                "default_branch": ref.get("name") or "main",
-                "last_commit_date": target.get("committedDate"),
-                "last_commit_sha": target.get("oid"),
-                "branches": [b["name"]
-                             for b in (node.get("refs") or {}).get("nodes") or []],
-                "topics": [t["topic"]["name"]
-                           for t in (node.get("repositoryTopics") or {}).get("nodes") or []
-                           if t.get("topic")],
-            })
-        if not nodes and cursor is None:
-            # First page came back empty: org resolution or token-scope problem.
-            sys.stderr.write("GraphQL: no repos returned for org=%r - check "
-                             "GITHUB_TOKEN scope / org access\n" % ORG)
-        page_info = repos_data.get("pageInfo") or {}
-        if page_info.get("hasNextPage") and page_info.get("endCursor"):
-            cursor = page_info["endCursor"]
-        else:
-            break
-    sys.stderr.write("GraphQL: fetched %d repos (%d queries)\n"
-                     % (len(all_repos), _graphql_call_count))
-    return all_repos
 
 
 # --- Cloudflare Pages API layer (best-effort; never raises) ---------------
@@ -567,753 +448,287 @@ def cf_get_deployments(project_name, per_page=20):
     return latest
 
 
-# --- per-repo topology ----------------------------------------------------
+# --- REST bulk fetch --------------------------------------------------------
 
-def fetch_pages(repo):
-    """GitHub Pages status for the repo, or None if Pages is not enabled.
 
-    ``GET /repos/{org}/{repo}/pages`` -> 200 = enabled (returns ``html_url``
-    + ``status``); 404 = not enabled (None). Any other error -> None.
+def fetch_repos():
+    """Return every repo of the org via paginated
+    ``GET /orgs/ebpro/repos?type=all&per_page=100`` (``all`` includes
+    archived + private; archived ones are filtered out by _classify)."""
+    repos = []
+    page = 1
+    while True:
+        url = "%s/orgs/%s/repos?type=all&per_page=100&page=%d" % (
+            API, ORG, page)
+        batch = _request(url)
+        if not batch:
+            break
+        repos.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    return repos
+
+
+# --- classification helpers --------------------------------------------------
+
+
+def _classify(repo):
+    """Return the display area key for ``repo``, or None to exclude it.
+
+    Rules (design spec): archived -> excluded; any excluded area topic ->
+    excluded; otherwise the first teaching area in INCLUDE_AREAS order;
+    a repo with no teaching area but the ``fmt-ipynb`` topic falls back to
+    the pseudo-area ``ipynb``.
     """
-    name = repo["name"]
+    if repo.get("archived"):
+        return None
+    topics = repo.get("topics") or []
+    areas = {t[len("area-"):] for t in topics if t.startswith("area-")}
+    if areas & set(EXCLUDE_AREAS):
+        return None
+    for area in INCLUDE_AREAS:
+        if area in areas:
+            return area
+    if "fmt-ipynb" in topics:
+        return IPYNB_AREA
+    return None
+
+
+def _status_of(repo):
+    """First ``status-*`` topic suffix, or None."""
+    for t in repo.get("topics") or []:
+        if t.startswith("status-"):
+            return t[len("status-"):]
+    return None
+
+
+def _relative_fr(iso):
+    """``2026-10-11T08:12:00Z`` -> ``il y a 3 j`` (French, coarse)."""
     try:
-        data = _request("%s/repos/%s/%s/pages" % (API, ORG, name),
-                        none_on=(404,), attempts=2)
-    except Exception:
+        dt = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except (TypeError, ValueError):
         return None
-    if not isinstance(data, dict):
-        return None
-    return {
-        "html_url": data.get("html_url")
-        or "%s/%s/" % (GITHUB_IO_BASE, name),
-        "status": data.get("status"),
-    }
+    secs = (datetime.now(timezone.utc) - dt).total_seconds()
+    if secs < 3600:
+        return "il y a %d min" % max(1, int(secs // 60))
+    if secs < 86400:
+        return "il y a %d h" % int(secs // 3600)
+    days = secs / 86400.0
+    if days < 31:
+        return "il y a %d j" % int(days)
+    if days < 365:
+        return "il y a %d sem" % int(days // 7)
+    if days < 730:
+        return "il y a 1 an"
+    return "il y a %d ans" % int(days // 365)
 
 
-def fetch_latest_ci(repo):
-    """Most recent GitHub Actions run for the repo, or None if none exists.
-
-    ``GET /repos/{org}/{repo}/actions/runs?per_page=1`` -> first workflow run.
-    Returns ``{status, conclusion, html_url, name, head_sha, head_branch,
-    run_at}`` (each field may be None/"" when absent).
-    """
-    name = repo["name"]
+def _gen_date_fr(iso_utc):
+    """``2026-10-14T10:00:00Z`` -> ``14/10/2026 à 12:00`` (local-free, UTC)."""
     try:
-        data = _request("%s/repos/%s/%s/actions/runs?per_page=1"
-                        % (API, ORG, name), attempts=2)
-    except Exception:
-        return None
-    runs = data.get("workflow_runs") if isinstance(data, dict) else None
-    if not runs:
-        return None
-    run = runs[0]
-    return {
-        "status": run.get("status"),
-        "conclusion": run.get("conclusion"),
-        "html_url": run.get("html_url"),
-        "name": run.get("name"),
-        "head_sha": run.get("head_sha"),
-        "head_branch": run.get("head_branch"),
-        "run_at": run.get("run_at"),
-    }
+        dt = datetime.strptime(iso_utc, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return iso_utc
+    return dt.strftime("%d/%m/%Y à %H:%M UTC")
 
 
-# --- Web Components rendering ---------------------------------------------
-
-def _write_file(path, content):
-    """Write ``content`` to ``path``, creating parent directories as needed."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
+# --- rendering ---------------------------------------------------------------
 
 
-def _render_data_js(data, titles, meta):
-    """Render the ``data.js`` module with the actual catalog data."""
-    return (
-        "// Auto-generated by catalog.py \u2014 do not edit\n"
-        "export const META = %s;\n"
-        "export const DATA = %s;\n"
-        "export const TITLES = %s;\n"
-        % (_safe_json(meta), _safe_json(data), _safe_json(titles))
-    )
+def _render_card(c):
+    """Return the <article> for one catalog entry ``c``."""
+    area = c["area"]
+    muted = " opacity-60" if c["status"] in STATUS_MUTED else ""
+    esc_name = html.escape(c["name"])
+    esc_desc = html.escape(c["description"] or "")
+    parts = [
+        '<article data-area="%s" class="card %s border rounded-xl p-4 '
+        'flex flex-col%s">' % (area, AREA_CARD[area], muted),
+        '<h3 class="font-semibold text-slate-900 leading-snug break-words">'
+        '%s</h3>' % esc_name,
+        '<p class="mt-1 text-sm text-slate-600 line-clamp-2">%s</p>'
+        % (esc_desc or "&nbsp;"),
+        '<div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] '
+        'font-medium">',
+        '<span class="px-2 py-0.5 rounded-full %s">%s</span>'
+        % (AREA_CHIP[area], AREA_LABELS[area]),
+    ]
+    if c["status"]:
+        label = STATUS_LABELS.get(c["status"], html.escape(c["status"]))
+        parts.append(
+            '<span class="px-2 py-0.5 rounded-full bg-white/70 '
+            'text-slate-700">%s</span>' % label)
+    if c["ipynb"]:
+        parts.append(
+            '<span class="w-2 h-2 rounded-full bg-orange-300" '
+            'title="Contenu Jupyter (ipynb)"></span>')
+    parts.append("</div>")
+    links = []
+    if c["site_url"]:
+        links.append('<a class="underline-offset-2 hover:underline '
+                     'text-slate-800" href="%s">Site</a>' % c["site_url"])
+    links.append('<a class="underline-offset-2 hover:underline '
+                 'text-slate-800" href="%s">Source</a>' % c["github_url"])
+    updated = ("Mis à jour %s" % c["updated"]) if c["updated"] else ""
+    parts.append(
+        '<footer class="mt-auto pt-3 text-xs flex items-center gap-3 '
+        'text-slate-600">%s%s</footer>'
+        % ("".join(links),
+           ('<span class="ml-auto whitespace-nowrap">%s</span>' % updated)
+           if updated else ""))
+    parts.append("</article>")
+    return "\n      ".join(parts)
 
 
-def _render_card_js():
-    """Return the static ``card.js`` Web Component source."""
-    return r"""// card.js — <repo-card> Web Component (zero dependencies)
-import { TITLES } from './data.js';
-
-class RepoCard extends HTMLElement {
-  set repo(data) {
-    this._data = data;
-    this.render();
-  }
-  get repo() { return this._data; }
-
-  connectedCallback() {
-    this._profile = document.body.dataset.profile || 'student';
-  }
-
-  render() {
-    const d = this._data;
-    if (!d) return;
-    const icon = {lecture:'📚',notebook:'📓',sample:'💻',demo:'🎬'}[d.type] || '📦';
-    const title = TITLES[d.name] || d.name.replace(/[-_]/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
-
-    if (this._profile === 'student') {
-      const isExample = (d.type === 'sample' || d.type === 'demo');
-      // develop button → "Version de travail" for lectures/notebooks, "Consulter le cours" for examples
-      const developCta = d.develop_url
-        ? `<a class="cta cta-primary" href="${d.develop_url}" target="_blank" rel="noopener">${isExample ? '📖 Consulter le cours' : '🔧 Version de travail'}</a>`
-        : (isExample ? '' : `<span class="cta cta-disabled" title="Pas encore disponible">🔧 Version de travail</span>`);
-      // stable button (unchanged)
-      const stableCta = d.stable_url
-        ? `<a class="cta cta-secondary" href="${d.stable_url}" target="_blank" rel="noopener">📊 Version stable</a>`
-        : `<span class="cta cta-disabled" title="Pas encore disponible">📊 Version stable</span>`;
-      // GitHub button: examples ONLY (fallback when no develop and no stable)
-      const githubCta = (isExample && !d.develop_url && !d.stable_url)
-        ? `<a class="cta cta-secondary" href="${d.github_url}" target="_blank" rel="noopener">💻 Voir sur GitHub</a>`
-        : '';
-      this.innerHTML = `
-        <div class="card-inner">
-          <div class="card-icon">${icon}</div>
-          <h3 class="card-title">${title}</h3>
-          ${d.description ? `<p class="card-desc">${d.description}</p>` : ''}
-          <div class="card-cta">
-            ${developCta}
-            ${stableCta}
-            ${githubCta}
-          </div>
-        </div>`;
-    } else {
-      // Teacher: full detail
-      const ciDot = d.ci_status === 'success' ? '🟢' : d.ci_status === 'failure' ? '🔴' : '⚪';
-      const ciEmoji = d.ci_status === 'success' ? '✅' : d.ci_status === 'failure' ? '❌' : d.ci_status === 'in_progress' ? '🔄' : '';
-      const topics = (d.topics||[]).map(t => {
-        const cls = t.startsWith('area-') ? 'badge-area' : t.startsWith('status-') ? 'badge-status' : 'badge';
-        return `<span class="badge ${cls}">${t}</span>`;
-      }).join('');
-
-      // CF branch links
-      let cfLinks = '';
-      if (d.cf_deployments && Object.keys(d.cf_deployments).length) {
-        cfLinks = Object.entries(d.cf_deployments).map(([branch, dep]) => {
-          const status = dep.status === 'complete' || dep.status === 'success' ? '✅' : dep.status === 'error' || dep.status === 'failure' ? '❌' : '⏳';
-          return `<a class="branch-link" href="${dep.url}" target="_blank" rel="noopener">${status} ${branch}</a>`;
-        }).join('');
-      }
-
-      // GitHub branches (not in CF)
-      let ghBranches = '';
-      if (d.branches && d.branches.length) {
-        const cfBranches = new Set(Object.keys(d.cf_deployments || {}));
-        const ghOnly = d.branches.filter(b => !cfBranches.has(b)).slice(0, 5);
-        if (ghOnly.length) {
-          ghBranches = ghOnly.map(b => `<span class="branch-chip">${b}</span>`).join('');
-        }
-      }
-
-      const updated = d.updated_at ? `<div class="card-footer">Mis à jour: ${relativeTime(d.updated_at)}</div>` : '';
-
-      this.innerHTML = `
-        <div class="card-inner">
-          <div class="card-header-row">
-            <span class="status-dot">${ciDot}</span>
-            <div class="card-icon">${icon}</div>
-            <h3 class="card-title"><a href="${d.github_url}" target="_blank" rel="noopener">${d.name}</a></h3>
-            ${d.ci_url ? `<a class="ci-link" href="${d.ci_url}" target="_blank" rel="noopener">${ciEmoji}</a>` : ''}
-          </div>
-          ${d.description ? `<p class="card-desc">${d.description}</p>` : ''}
-          <div class="card-topics">${topics}</div>
-          <div class="card-cta">
-            ${d.develop_url ? `<a class="cta cta-primary" href="${d.develop_url}" target="_blank" rel="noopener">📖 Consulter le cours</a>` : ''}
-            ${d.stable_url ? `<a class="cta cta-secondary" href="${d.stable_url}" target="_blank" rel="noopener">📊 Version stable</a>` : ''}
-            ${!d.develop_url && !d.stable_url ? `<a class="cta cta-secondary" href="${d.github_url}" target="_blank" rel="noopener">💻 Voir sur GitHub</a>` : ''}
-          </div>
-          ${cfLinks ? `<div class="card-branches">${cfLinks}</div>` : ''}
-          ${ghBranches ? `<div class="card-branches">${ghBranches}</div>` : ''}
-          ${updated}
-        </div>`;
-    }
-  }
-}
-
-function relativeTime(iso) {
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 60) return mins + ' min';
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return hrs + 'h';
-  const days = Math.floor(hrs / 24);
-  return days + 'j';
-}
-
-customElements.define('repo-card', RepoCard);
-"""
-
-
-def _render_app_js():
-    """Return the static ``app.js`` bootstrap source."""
-    return r"""// app.js — Application bootstrap (zero dependencies)
-import { DATA, TITLES, META } from './data.js';
-import './card.js';
-
-const profile = document.body.dataset.profile || 'student';
-const content = document.getElementById('content');
-const searchInput = document.getElementById('search');
-const filterChips = document.getElementById('filter-chips');
-const statsBar = document.getElementById('stats-bar');
-let currentFilter = 'all';
-let searchQuery = '';
-
-// Stats (teacher only)
-if (profile === 'teacher' && statsBar) {
-  const total = DATA.length;
-  const green = DATA.filter(r => r.ci_status === 'success').length;
-  const red = DATA.filter(r => r.ci_status === 'failure').length;
-  statsBar.innerHTML = `
-    <span class="stat"><strong>${total}</strong> ressources</span>
-    <span class="stat stat-green"><strong>${green}</strong> ✅</span>
-    <span class="stat stat-red"><strong>${red}</strong> ❌</span>
-    <span class="stat">Généré le ${new Date(META.generated_at).toLocaleDateString('fr-FR')}</span>
-  `;
-}
-
-// Filter chips
-if (filterChips) {
-  const chips = profile === 'teacher' 
-    ? ['all','lecture','notebook','failed','recent']
-    : ['all','lecture','notebook','sample'];
-  const labels = {all:'Tous',lecture:'📘 Cours',notebook:'📓 Notebooks',sample:'💻 Examples',failed:'❌ Erreurs',recent:'🕐 Récents'};
-  filterChips.innerHTML = chips.map(c => 
-    `<button class="chip ${c==='all'?'active':''}" data-filter="${c}">${labels[c]}</button>`
-  ).join('');
-  filterChips.addEventListener('click', e => {
-    const btn = e.target.closest('.chip');
-    if (!btn) return;
-    currentFilter = btn.dataset.filter;
-    filterChips.querySelectorAll('.chip').forEach(b => b.classList.toggle('active', b === btn));
-    render();
-  });
-}
-
-// Search
-if (searchInput) {
-  searchInput.addEventListener('input', e => {
-    searchQuery = e.target.value.toLowerCase();
-    render();
-  });
-}
-
-function getFiltered() {
-  let items = [...DATA];
-  
-  // Student: only status-active
-  if (profile === 'student') {
-    items = items.filter(r => (r.topics||[]).includes('status-active'));
-  }
-  
-  // Type filter
-  if (currentFilter === 'lecture') items = items.filter(r => r.type === 'lecture');
-  else if (currentFilter === 'notebook') items = items.filter(r => r.type === 'notebook');
-  else if (currentFilter === 'sample') items = items.filter(r => r.type === 'sample' || r.type === 'demo');
-  else if (currentFilter === 'failed') items = items.filter(r => r.ci_status === 'failure');
-  else if (currentFilter === 'recent') {
-    const dayAgo = Date.now() - 86400000;
-    items = items.filter(r => r.updated_at && new Date(r.updated_at) > new Date(dayAgo));
-  }
-  
-  // Search
-  if (searchQuery) {
-    items = items.filter(r => 
-      r.name.toLowerCase().includes(searchQuery) ||
-      (r.description||'').toLowerCase().includes(searchQuery) ||
-      (r.topics||[]).some(t => t.toLowerCase().includes(searchQuery))
-    );
-  }
-  
-  // Sort
-  if (profile === 'teacher') {
-    const ciOrder = {failure:0, in_progress:1, queued:2, success:3};
-    items.sort((a,b) => {
-      const ca = ciOrder[a.ci_status] ?? 4;
-      const cb = ciOrder[b.ci_status] ?? 4;
-      if (ca !== cb) return ca - cb;
-      return (b.updated_at||'').localeCompare(a.updated_at||'');
-    });
-  } else {
-    items.sort((a,b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
-  }
-  
-  return items;
-}
-
-function render() {
-  const items = getFiltered();
-  
-  if (!items.length) {
-    content.innerHTML = '<div class="empty">🔍 Aucun résultat trouvé</div>';
-    return;
-  }
-  
-  // Group by type for student view
-  if (profile === 'student') {
-    const lectures = items.filter(r => r.type === 'lecture');
-    const notebooks = items.filter(r => r.type === 'notebook');
-    const examples = items.filter(r => r.type === 'sample' || r.type === 'demo');
-    const section = (title, arr) =>
-      '<h2 class="section-title">' + title + '</h2><div class="card-grid">' +
-      arr.map(r => cardHtml(r)).join('') + '</div>';
-    let html = '';
-    if (lectures.length) html += section('📚 Cours', lectures);
-    if (notebooks.length) html += section('📓 Notebooks', notebooks);
-    if (examples.length) html += section('💻 Examples', examples);
-    content.innerHTML = html;
-  } else {
-    content.innerHTML = '<div class="card-grid">' + items.map(r => cardHtml(r)).join('') + '</div>';
-  }
-  
-  // Upgrade to web components
-  content.querySelectorAll('repo-card').forEach(el => {
-    const name = el.dataset.name;
-    const repo = DATA.find(r => r.name === name);
-    if (repo) el.repo = repo;
-  });
-}
-
-function cardHtml(r) {
-  return `<repo-card data-name="${r.name}"></repo-card>`;
-}
-
-// Initial render
-render();
-"""
-
-
-def _render_css():
-    """Return the static ``styles.css`` source."""
-    return """/* styles.css — ebpro teaching catalog (shared) */
-:root {
-  --bg: #f8fafc; --surface: #ffffff; --text: #1e293b; --text-muted: #64748b;
-  --primary: #3b82f6; --primary-hover: #2563eb; --success: #22c55e;
-  --error: #ef4444; --warning: #f59e0b; --border: #e2e8f0;
-  --radius: 12px; --shadow: 0 1px 3px rgba(0,0,0,0.08);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.12); --max-w: 1200px;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg:#0f172a; --surface:#1e293b; --text:#f1f5f9; --text-muted:#94a3b8; --border:#334155; --shadow:0 1px 3px rgba(0,0,0,0.3); --shadow-md:0 4px 12px rgba(0,0,0,0.4); }
-}
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font: 16px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif; background: var(--bg); color: var(--text); }
-a { color: var(--primary); text-decoration: none; }
-a:hover { text-decoration: underline; }
-
-/* Landing page */
-.landing { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2rem; padding: 2rem; text-align: center; }
-.landing h1 { font-size: 2.5rem; }
-.landing p { color: var(--text-muted); max-width: 500px; }
-.landing-buttons { display: flex; gap: 1.5rem; flex-wrap: wrap; justify-content: center; }
-.landing-btn { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; padding: 2rem 3rem; border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); transition: transform .2s, box-shadow .2s; font-size: 1.1rem; font-weight: 600; }
-.landing-btn:hover { transform: translateY(-4px); box-shadow: var(--shadow-md); text-decoration: none; }
-.landing-btn .icon { font-size: 3rem; }
-.landing-stats { color: var(--text-muted); font-size: 0.9rem; }
-
-/* Header (profile pages) */
-header { position: sticky; top: 0; z-index: 100; background: var(--surface); border-bottom: 1px solid var(--border); padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-header h1 { font-size: 1.3rem; white-space: nowrap; }
-header h1 span { opacity: 0.6; font-weight: 400; }
-.search { flex: 1; min-width: 200px; max-width: 400px; padding: 0.5rem 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 0.95rem; }
-.search:focus { outline: none; border-color: var(--primary); }
-.back-link { font-size: 0.9rem; color: var(--text-muted); }
-
-/* Stats bar (teacher) */
-.stats-bar { display: flex; gap: 1.5rem; padding: 0.75rem 2rem; background: var(--surface); border-bottom: 1px solid var(--border); font-size: 0.9rem; color: var(--text-muted); flex-wrap: wrap; }
-.stat strong { color: var(--text); }
-.stat-green strong { color: var(--success); }
-.stat-red strong { color: var(--error); }
-
-/* Filter chips */
-.filter-chips { display: flex; gap: 0.5rem; padding: 1rem 2rem; flex-wrap: wrap; }
-.chip { padding: 0.4rem 1rem; border-radius: 20px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; font-size: 0.85rem; transition: all .15s; }
-.chip:hover { border-color: var(--primary); }
-.chip.active { background: var(--primary); color: white; border-color: var(--primary); }
-
-/* Content */
-main { max-width: var(--max-w); margin: 0 auto; padding: 1rem 2rem 4rem; }
-.section-title { font-size: 1.4rem; margin: 2rem 0 1rem; }
-.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.5rem; margin-bottom: 2rem; }
-.empty { text-align: center; padding: 4rem; color: var(--text-muted); font-size: 1.2rem; }
-
-/* Card (web component) */
-repo-card { display: block; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); transition: box-shadow .2s; overflow: hidden; }
-repo-card:hover { box-shadow: var(--shadow-md); }
-.card-inner { padding: 1.5rem; }
-.card-header-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
-.status-dot { font-size: 0.8rem; }
-.card-icon { font-size: 2rem; }
-.card-title { font-size: 1.1rem; font-weight: 600; margin: 0.5rem 0; }
-.card-title a { color: var(--text); }
-.card-desc { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1rem; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.card-topics { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 1rem; }
-.badge { padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; background: var(--bg); border: 1px solid var(--border); }
-.badge-area { background: #dbeafe; color: #1e40af; border-color: #93c5fd; }
-.badge-status { background: #dcfce7; color: #166534; border-color: #86efac; }
-
-/* CTA buttons */
-.card-cta { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; }
-.cta { padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.85rem; font-weight: 500; text-align: center; transition: all .15s; }
-.cta-primary { background: var(--primary); color: white; }
-.cta-primary:hover { background: var(--primary-hover); text-decoration: none; }
-.cta-secondary { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
-.cta-secondary:hover { border-color: var(--primary); text-decoration: none; }
-.cta-disabled { background: var(--bg); color: var(--text-muted); border: 1px solid var(--border); opacity: 0.5; cursor: not-allowed; }
-
-/* Branches (teacher) */
-.card-branches { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.75rem; }
-.branch-link { padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; background: var(--bg); border: 1px solid var(--border); color: var(--text); }
-.branch-link:hover { border-color: var(--primary); text-decoration: none; }
-.branch-chip { padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; background: var(--bg); color: var(--text-muted); }
-.card-footer { margin-top: 0.75rem; font-size: 0.8rem; color: var(--text-muted); }
-.ci-link { margin-left: auto; font-size: 1rem; }
-
-/* Student: hide teacher-only elements (safety net) */
-[data-profile="student"] .card-topics,
-[data-profile="student"] .card-branches,
-[data-profile="student"] .card-footer,
-[data-profile="student"] .stats-bar,
-[data-profile="student"] .ci-link { display: none; }
-
-/* Responsive */
-@media (max-width: 600px) {
-  .card-grid { grid-template-columns: 1fr; }
-  header { padding: 0.75rem 1rem; }
-  main { padding: 1rem; }
-  .landing-buttons { flex-direction: column; }
-  .landing-btn { width: 100%; max-width: 300px; }
-}
-"""
-
-
-def _render_landing():
-    """Return the ``index.html`` landing page source."""
+def _render_index(cards, generated_at):
+    """Return the full index.html source (Tailwind Play CDN delivery)."""
+    count = len(cards)
+    # Filter chips: "Tous" + each area present, in INCLUDE_AREAS order.
+    order = list(INCLUDE_AREAS) + [IPYNB_AREA]
+    present = [a for a in order if any(c["area"] == a for c in cards)]
+    tally = {a: sum(1 for c in cards if c["area"] == a) for a in present}
+    chip_btns = [
+        '<button data-filter="all" class="px-3 py-1 rounded-full text-sm '
+        'bg-slate-800 text-white ring-2 ring-slate-800">Tous (%d)</button>'
+        % count]
+    for a in present:
+        chip_btns.append(
+            '<button data-filter="%s" class="px-3 py-1 rounded-full text-sm '
+            'bg-white border border-slate-300 text-slate-700 '
+            'hover:bg-slate-100">%s (%d)</button>'
+            % (a, AREA_LABELS[a], tally[a]))
+    grid = "\n      ".join(_render_card(c) for c in cards)
     return """<!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ebpro — Plateforme d’enseignement</title>
-  <link rel="stylesheet" href="styles.css">
+  <title>Catalogue ebpro — Supports pédagogiques</title>
+  <!-- Tailwind Play CDN (v1 pragmatique : page statique régénérée par cron).
+       Swap to compiled CSS when a build step lands. -->
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-  <div class="landing">
-    <h1>📚 ebpro</h1>
-    <p>Plateforme d’enseignement — apprentissage par la pratique. Notebooks, cours et laboratoires interactifs avec intégration continue.</p>
-    <div class="landing-buttons">
-      <a class="landing-btn" href="etudiant.html"><span class="icon">🎓</span>Espace Étudiant</a>
-      <a class="landing-btn" href="enseignant.html"><span class="icon">👨‍🏫</span>Espace Enseignant</a>
+<body class="bg-slate-50 text-slate-800 antialiased">
+  <header class="max-w-7xl mx-auto px-4 pt-10 pb-4">
+    <h1 class="text-3xl font-semibold tracking-tight text-slate-900">
+      Catalogue ebpro</h1>
+    <p class="mt-1 text-slate-500">Supports pédagogiques de l'organisation
+      ebpro — cours, samples et références.</p>
+    <p class="mt-1 text-sm text-slate-400">%d supports</p>
+  </header>
+  <nav aria-label="Filtres" id="filters"
+       class="max-w-7xl mx-auto px-4 pb-2 flex flex-wrap items-center gap-2">
+    <span class="text-xs uppercase tracking-wide text-slate-400 mr-1"
+          >Filtres</span>
+    %s
+  </nav>
+  <main class="max-w-7xl mx-auto px-4 py-6">
+    <div id="grid"
+         class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      %s
     </div>
-    <div class="landing-stats" id="landing-stats"></div>
-  </div>
-  <script type="module">
-    import { META } from './data.js';
-    document.getElementById('landing-stats').textContent = 
-      `${META.count} ressources · Généré le ${new Date(META.generated_at).toLocaleDateString('fr-FR')}`;
+  </main>
+  <footer class="max-w-7xl mx-auto px-4 pb-10 text-xs text-slate-400">
+    Généré le %s · %d dépôts · source :
+    <a class="underline" href="https://github.com/ebpro/teaching-catalog"
+       >teaching-catalog</a>
+  </footer>
+  <script>
+    // Filtres par aire, bascule client-side sans dépendance.
+    const buttons = document.querySelectorAll('#filters button');
+    const cards = document.querySelectorAll('#grid .card');
+    buttons.forEach(btn => btn.addEventListener('click', () => {
+      const f = btn.dataset.filter;
+      buttons.forEach(b => {
+        const on = b === btn;
+        b.classList.toggle('ring-2', on);
+        b.classList.toggle('bg-slate-800', on);
+        b.classList.toggle('text-white', on);
+      });
+      cards.forEach(c =>
+        c.classList.toggle('hidden', f !== 'all' && c.dataset.area !== f));
+    }));
   </script>
 </body>
 </html>
-"""
+""" % (count, "\n    ".join(chip_btns), grid,
+       _gen_date_fr(generated_at), count)
 
 
-def _render_profile_page(profile):
-    """Return the profile page HTML (``etudiant.html`` or ``enseignant.html``)."""
-    if profile == "student":
-        return """<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ebpro — Espace Étudiant</title>
-  <link rel="stylesheet" href="styles.css">
-</head>
-<body data-profile="student">
-  <header>
-    <a class="back-link" href="./">←</a>
-    <h1>🎓 ebpro <span>— Espace Étudiant</span></h1>
-    <input type="search" id="search" class="search" placeholder="Rechercher un cours...">
-  </header>
-  <nav id="filter-chips" class="filter-chips"></nav>
-  <main id="content"><div class="empty">⏳ Chargement...</div></main>
-  <script type="module" src="app.js"></script>
-</body>
-</html>
-"""
-    else:
-        return """<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ebpro — Espace Enseignant</title>
-  <link rel="stylesheet" href="styles.css">
-</head>
-<body data-profile="teacher">
-  <header>
-    <a class="back-link" href="./">←</a>
-    <h1>👨‍🏫 ebpro <span>— Espace Enseignant</span></h1>
-    <input type="search" id="search" class="search" placeholder="Rechercher...">
-  </header>
-  <div id="stats-bar" class="stats-bar"></div>
-  <nav id="filter-chips" class="filter-chips"></nav>
-  <main id="content"><div class="empty">⏳ Chargement...</div></main>
-  <script type="module" src="app.js"></script>
-</body>
-</html>
-"""
-
-def _repo_type(name):
-    """Derive the display type from the repo name prefix."""
-    if name.startswith("lecture-"):
-        return "lecture"
-    if name.startswith("notebook-"):
-        return "notebook"
-    if name.startswith("sample-"):
-        return "sample"
-    return "demo"
-
-
-def _ci_status_normalized(ci):
-    """Normalize a latest_ci dict to a single status string for the JS layer.
-
-    Returns "success", "failure", "in_progress", "queued", or None.
-    """
-    if not ci:
-        return None
-    status = ci.get("status")
-    conclusion = ci.get("conclusion")
-    if status == "completed":
-        if conclusion == "success":
-            return "success"
-        if conclusion == "failure":
-            return "failure"
-        return None  # cancelled / skipped / neutral / stale
-    if status in ("in_progress", "queued"):
-        return status
-    return None
-
-
-def _build_data(manifest):
-    """Build the DATA object embedded in the dashboard HTML."""
-    repos_data = []
-    for name, repo in sorted(manifest["repos"].items()):
-        pages = repo.get("pages")
-        stable_url = pages["html_url"] if pages else None
-
-        cf_deps = repo.get("cf_deployments") or {}
-        develop_dep = cf_deps.get("develop")
-        develop_url = (develop_dep["url"]
-                       if develop_dep and develop_dep.get("url") else None)
-
-        ci = repo.get("latest_ci")
-        ci_status = _ci_status_normalized(ci)
-        ci_url = ci.get("html_url") if ci else None
-
-        trunk = repo.get("trunk")
-        updated_at = trunk["date"] if trunk else None
-
-        repos_data.append({
-            "name": name,
-            "type": _repo_type(name),
-            "description": repo.get("description") or "",
-            "topics": repo.get("topics") or [],
-            "stable_url": stable_url,
-            "develop_url": develop_url,
-            "cf_develop_url": develop_url,
-            "cf_production_url": repo.get("cf_production_url"),
-            "cf_deployments": cf_deps,
-            "ci_status": ci_status,
-            "ci_url": ci_url,
-            "updated_at": updated_at,
-            "default_branch": repo.get("default_branch"),
-            "branches": repo.get("branches") or [],
-            "github_url": "https://github.com/%s/%s" % (ORG, name),
-        })
-    return {
-        "generated_at": manifest["generated_at"],
-        "repos": repos_data,
-    }
-
-
-def _build_titles(manifest):
-    """Build the TITLES mapping (repo name -> README title) for the JS layer."""
-    titles = {}
-    for name, repo in manifest["repos"].items():
-        title = repo.get("readme_title")
-        if title:
-            titles[name] = title
-    return titles
-
-
-def _safe_json(obj):
-    """Serialize to JSON safe for embedding in a <script> tag.
-
-    Escapes ``</`` sequences to prevent premature ``</script>`` closure.
-    """
-    return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
-
-def _render_all(manifest):
-    """Write all output files for the two-page Web Components catalog."""
-    data = _build_data(manifest)["repos"]
-    titles = _build_titles(manifest)
-    meta = {
-        "generated_at": manifest["generated_at"],
-        "org": manifest["org"],
-        "count": manifest["count"],
-    }
-
-    os.makedirs(OUT_DIR, exist_ok=True)
-
-    _write_file(os.path.join(OUT_DIR, "data.js"), _render_data_js(data, titles, meta))
-    _write_file(os.path.join(OUT_DIR, "card.js"), _render_card_js())
-    _write_file(os.path.join(OUT_DIR, "app.js"), _render_app_js())
-    _write_file(os.path.join(OUT_DIR, "styles.css"), _render_css())
-    _write_file(os.path.join(OUT_DIR, "index.html"), _render_landing())
-    _write_file(os.path.join(OUT_DIR, "etudiant.html"), _render_profile_page("student"))
-    _write_file(os.path.join(OUT_DIR, "enseignant.html"), _render_profile_page("teacher"))
+def _write_file(path, content):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
 
 
 # --- entry point ----------------------------------------------------------
 
 def main():
-    global TOKEN, CF_TOKEN
+    global TOKEN
+    start_ts = time.time()
     TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
     if not TOKEN:
         sys.stderr.write("ERROR: GITHUB_TOKEN environment variable is empty\n")
         return 1
-    CF_TOKEN = os.environ.get("CF_API_TOKEN", "").strip()
 
-    all_repos = fetch_repos_graphql()
+    all_repos = fetch_repos()
     if not all_repos:
-        # A 0-repo result means the bulk GraphQL fetch failed outright (bad
-        # token scope / org resolution). Aborting here (non-zero exit) stops
-        # the deploy step from publishing an empty catalog over production.
+        # A 0-repo result means the fetch failed outright (bad token scope /
+        # org resolution). Aborting here (non-zero exit) stops the deploy
+        # step from publishing an empty catalog over production.
         sys.stderr.write(
-            "FATAL: GraphQL returned 0 repos - aborting to avoid deploying "
-            "an empty catalog (check GITHUB_TOKEN scope / org access)\n")
+            "FATAL: /orgs/%s/repos returned 0 repos - aborting to avoid "
+            "deploying an empty catalog (check GITHUB_TOKEN scope / org "
+            "access)\n" % ORG)
         return 1
-    kept = [r for r in all_repos
-            if r["name"].startswith(PREFIXES) and not r["is_archived"]]
-    kept.sort(key=lambda r: r["name"])
 
-    # --- Cloudflare Pages (inverted: list projects first, then fetch) ------
-    cf_projects = {}
-    cf_data_all = {}
-    cf_production_urls = {}
-    if CF_TOKEN:
-        sys.stderr.write("Fetching Cloudflare Pages data...\n")
-        cf_projects = cf_list_all_projects()
-        our_cf_names = set(r["name"].lower().replace("_", "-") for r in kept)
-        if cf_projects:
-            # Fast path: list-all worked, only fetch the matching projects.
-            for proj_name in cf_projects:
-                if proj_name in our_cf_names:
-                    cf_data_all[proj_name] = cf_get_deployments(proj_name)
-                    cf_production_urls[proj_name] = (
-                        "https://%s.pages.dev"
-                        % cf_projects[proj_name]["subdomain"])
-            sys.stderr.write(
-                "CF: %d projects listed, %d in catalog\n"
-                % (len(cf_projects), len(cf_data_all)))
-        else:
-            # Fallback: list-all returned 0 (token scope gap - can read
-            # individual project deployments but cannot enumerate the
-            # account's projects). Try the per-repo deployments path, which
-            # worked before the inversion. Production subdomain is unknown
-            # (no list-all), so fall back to the project name.
-            sys.stderr.write(
-                "CF: list-all returned 0 projects, falling back to per-repo\n")
-            for r in kept:
-                proj_name = r["name"].lower().replace("_", "-")
-                deps = cf_get_deployments(proj_name)
-                if deps:
-                    cf_data_all[proj_name] = deps
-                    cf_production_urls[proj_name] = (
-                        "https://%s.pages.dev" % proj_name)
-            sys.stderr.write(
-                "CF: per-repo fallback found %d projects\n"
-                % len(cf_data_all))
-
-    data = {}
-    loop_start = time.time()
-    for r in kept:
-        name = r["name"]
-        sys.stderr.write("Processing %s ...\n" % name)
-        cf_proj_name = name.lower().replace("_", "-")
-        cf_deps = cf_data_all.get(cf_proj_name, {})
-        cf_prod_url = cf_production_urls.get(cf_proj_name)
-        db = r["default_branch"]
-        # Trunk head, branch list, topics and description come from the
-        # GraphQL bulk fetch (fetch_repos_graphql); only Pages / CI still hit
-        # the REST API.
-        trunk_date = r.get("last_commit_date")
-        trunk = ({"branch": db, "sha": r.get("last_commit_sha"),
-                  "date": trunk_date, "subject": None}
-                 if trunk_date else None)
-        branches = sorted(b for b in (r.get("branches") or []) if b != db)
-        data[name] = {
-            "default_branch": db,
-            "readme_title": r.get("description") or "",
+    cards = []
+    for r in all_repos:
+        area = _classify(r)
+        if area is None:
+            continue
+        site_url = (
+            "%s/%s/develop/" % (SITE_BASE, r["name"])
+            if area in RENDER_CALLER_AREAS else None)
+        cards.append({
+            "name": r["name"],
             "description": r.get("description"),
             "topics": r.get("topics") or [],
-            "trunk": trunk,
-            "branches": branches,
-            "pages": fetch_pages(r),
-            "latest_ci": fetch_latest_ci(r),
-            "cf_production_url": cf_prod_url,
-            "cf_deployments": cf_deps,
-        }
-    elapsed = time.time() - loop_start
-    print("Total: %d repos in %.1fs | API calls: %d | "
-          "Rate limit remaining: %d"
-          % (len(data), elapsed, _call_count, _rate_limit_remaining))
+            "area": area,
+            "status": _status_of(r),
+            "ipynb": "fmt-ipynb" in (r.get("topics") or []),
+            "pushed_at": r.get("pushed_at"),
+            "updated": _relative_fr(r.get("pushed_at")),
+            "site_url": site_url,
+            "github_url": r.get("html_url")
+                          or "https://github.com/%s/%s" % (ORG, r["name"]),
+        })
 
-    if CF_TOKEN:
-        sys.stderr.write(
-            "CF: account=%s (accounts HTTP %s) | cf_api_calls=%d | "
-            "projects listed=%d deployments fetched=%d\n"
-            % ((cf_account_id() or "NONE"), _cf_accounts_status,
-               _cf_call_count, _cf_projects_listed,
-               _cf_deployments_fetched))
+    # Group by area (teaching order first), then alphabetical within an area.
+    order = {a: i for i, a in enumerate(INCLUDE_AREAS + (IPYNB_AREA,))}
+    cards.sort(key=lambda c: (order[c["area"]], c["name"]))
 
-    manifest = {
-        "generated_at": datetime.now(timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"),
-        "org": ORG,
-        "count": len(data),
-        "repos": data,
-    }
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     os.makedirs(OUT_DIR, exist_ok=True)
+    _write_file(os.path.join(OUT_DIR, "index.html"),
+                _render_index(cards, generated_at))
     with open(os.path.join(OUT_DIR, "manifest.json"), "w",
               encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
+        json.dump({
+            "generated_at": generated_at,
+            "org": ORG,
+            "count": len(cards),
+            "repos": cards,
+        }, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    _render_all(manifest)
-
-    readme_missing = sum(1 for r in data.values()
-                         if not r.get("readme_title"))
-    sys.stderr.write(
-        "Wrote %s/ (2-page Web Components catalog, %d repos)\n"
-        % (OUT_DIR, len(data)))
-    print("Total GitHub API requests: %d" % _call_count)
-    print("Total GraphQL queries: %d" % _graphql_call_count)
-    if CF_TOKEN:
-        print("Total Cloudflare API requests: %d" % _cf_call_count)
-        print("CF account id: %s" % (cf_account_id() or "NONE"))
-    else:
-        print("CF account id: (no CF token -> no preview lookups)")
-    print("Repos without README title (404/no-heading/skipped): %d"
-          % readme_missing)
+    print("Total: %d catalog cards from %d org repos in %.1fs | "
+          "API calls: %d" % (len(cards), len(all_repos),
+                             time.time() - start_ts, _call_count))
+    sys.stderr.write("Wrote %s/ (Tailwind card grid, %d repos)\n"
+                     % (OUT_DIR, len(cards)))
     return 0
 
 
