@@ -4,17 +4,21 @@
 Scans the ``ebpro`` GitHub org (``GET /orgs/ebpro/repos``) and renders a
 self-contained static card grid of the teaching surface under ``./public/``:
 
-  * one pastel card per repo tagged area-lecture / area-sample /
-    area-standard / area-reference / area-student (plus anything tagged
-    ``fmt-ipynb`` that carries no teaching area),
-  * archived repos and the non-teaching areas (infra / cicd / image /
-    meta / personal) are excluded,
-  * card content: repo title, 2-line clamped description, one area chip +
-    one status chip, and a footer with Site (render-callers only), Source
-    (GitHub) and the relative last-update date.
+  * three display categories only: Notebook (``fmt-ipynb`` topic, wins over
+    the area topic), Lecture (``area-lecture`` non-ipynb) and Samples
+    (``area-sample`` plus the forced names in FORCED_SAMPLES); EVERY other
+    repo (archived, area-standard / reference / student / infra / cicd /
+    image / meta / personal, untagged) is excluded from the page entirely,
+  * card content: repo title, 2-line clamped description, category chip +
+    status chip, and a pill-button footer: ``Site · Develop``, ``Site ·
+    Stable`` (only when the repo has a ``v*`` tag), ``Source`` (GitHub) and
+    a zero-JS ``Branches ▾`` dropdown (<details>/<summary>) listing the
+    non-default branches, plus the relative last-update date.
 
-The published-site links are generated per area WITHOUT probing the URLs at
-build time (too slow / flaky for a cron job); a stale link is acceptable.
+Branch/tag data is fetched per displayed repo (2 REST calls each,
+ThreadPool(8)); a per-repo fetch failure degrades silently to hiding the
+matching button. Site URLs are NOT probed at build time; a stale link is
+acceptable (see the stable-pointer note in _render_card).
 
 Tailwind CSS is delivered via the Play CDN in the template (see the note
 there); fonts are the system stack, no images or icons.
@@ -29,10 +33,13 @@ import argparse
 import html
 import json
 import os
+import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 # --- configuration --------------------------------------------------------
@@ -48,40 +55,35 @@ SITE_BASE = "https://bruno.univ-tln.fr/teaching-material"
 
 # --- teaching surface (classification topics, ebpro org labeling) ----------
 
-INCLUDE_AREAS = ("lecture", "sample", "standard", "reference", "student")
-EXCLUDE_AREAS = ("infra", "cicd", "image", "meta", "personal")
-# Areas whose repos are Quarto render-callers -> get a "Site" link.
-RENDER_CALLER_AREAS = ("lecture", "sample", "standard")
-# Pseudo-area for fmt-ipynb repos without a teaching area tag.
-IPYNB_AREA = "ipynb"
+# Display surface: THREE categories only (user spec). Repo -> category:
+#   notebook : fmt-ipynb topic (wins over the area topic)
+#   lecture  : area-lecture, non-ipynb
+#   sample   : area-sample + FORCED_SAMPLES
+# Everything else (area-standard / reference / student / infra / cicd /
+# image / meta / personal, untagged, archived) is excluded entirely.
+CATEGORIES = ("lecture", "notebook", "sample")
 
-AREA_LABELS = {
+# Repos taught as samples regardless of their area topic (user decision).
+FORCED_SAMPLES = ("conflictbot", "eye", "hellogit")
+
+CATEGORY_LABELS = {
     "lecture": "Lecture",
+    "notebook": "Notebook",
     "sample": "Samples",
-    "standard": "Standards",
-    "reference": "Références",
-    "student": "Étudiants",
-    IPYNB_AREA: "Notebooks",
 }
 
 # Pastel card backgrounds + borders (Tailwind classes).
-AREA_CARD = {
+CATEGORY_CARD = {
     "lecture": "bg-sky-100 border-sky-300",
+    "notebook": "bg-orange-100 border-orange-300",
     "sample": "bg-emerald-100 border-emerald-300",
-    "standard": "bg-amber-100 border-amber-300",
-    "reference": "bg-violet-100 border-violet-300",
-    "student": "bg-rose-100 border-rose-300",
-    IPYNB_AREA: "bg-orange-100 border-orange-300",
 }
 
-# Area chip styles (one shade darker than the card).
-AREA_CHIP = {
+# Category chip styles (one shade darker than the card).
+CATEGORY_CHIP = {
     "lecture": "bg-sky-200 text-sky-900",
+    "notebook": "bg-orange-200 text-orange-900",
     "sample": "bg-emerald-200 text-emerald-900",
-    "standard": "bg-amber-200 text-amber-900",
-    "reference": "bg-violet-200 text-violet-900",
-    "student": "bg-rose-200 text-rose-900",
-    IPYNB_AREA: "bg-orange-200 text-orange-900",
 }
 
 # Statuses rendered with reduced emphasis.
@@ -91,7 +93,8 @@ STATUS_LABELS = {
     "active": "actif",
     "partial": "partiel",
     "stub": "ébauche",
-    "legacy": "héritage",
+    # "legacy" stays literally "legacy" (user spec: do NOT translate it).
+    "legacy": "legacy",
     "frozen": "figé",
     "duplicate": "dupliqué",
 }
@@ -111,15 +114,17 @@ _RETRYABLE_HTTP = (403, 429)
 # eliminating the fixed-30s 403 sleeps that previously triggered on bursts.
 _last_api_call = 0.0
 _API_CALL_INTERVAL = 0.2  # 200 ms between calls
+_pace_lock = threading.Lock()  # pacing is global even under ThreadPool(8)
 
 
 def _pace():
-    """Ensure minimum interval between API calls."""
+    """Ensure minimum interval between API calls (thread-safe)."""
     global _last_api_call
-    elapsed = time.monotonic() - _last_api_call
-    if elapsed < _API_CALL_INTERVAL:
-        time.sleep(_API_CALL_INTERVAL - elapsed)
-    _last_api_call = time.monotonic()
+    with _pace_lock:
+        elapsed = time.monotonic() - _last_api_call
+        if elapsed < _API_CALL_INTERVAL:
+            time.sleep(_API_CALL_INTERVAL - elapsed)
+        _last_api_call = time.monotonic()
 
 # --- proactive rate-limit tracking ----------------------------------------
 # GitHub reports the *primary* (5000/hour) limit on every response. We track
@@ -470,28 +475,86 @@ def fetch_repos():
     return repos
 
 
+# --- per-repo branches + tags (for the card footer buttons) -----------------
+
+
+def _vtag_key(tag):
+    """Sort key approximating ``sort -V`` for a ``v*`` tag name."""
+    parts = re.split(r"[.\-+]", tag[1:])  # drop the leading "v"
+    return [(0, int(p)) if p.isdigit() else (1, p) for p in parts]
+
+
+def _latest_vtag(tags):
+    """Latest ``^v`` tag name among GitHub tag objects, or None."""
+    names = [t.get("name") for t in tags
+             if t.get("name") and re.match(r"^v", t["name"])]
+    if not names:
+        return None
+    return max(names, key=_vtag_key)
+
+
+def _fetch_repo_extras(name, default_branch):
+    """Return ``(non-default branches, latest v* tag)`` for one repo.
+
+    2 REST calls (branches + tags, per_page=100, single page). Any failure
+    degrades to an empty result so the corresponding button is hidden rather
+    than breaking the build.
+    """
+    try:
+        br = _request("%s/repos/%s/%s/branches?per_page=100" % (API, ORG, name))
+    except Exception as e:  # noqa: BLE001 - degrade, never break the build
+        sys.stderr.write("WARN: branches fetch failed for %s (%s)\n" % (name, e))
+        br = None
+    try:
+        tg = _request("%s/repos/%s/%s/tags?per_page=100" % (API, ORG, name))
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("WARN: tags fetch failed for %s (%s)\n" % (name, e))
+        tg = None
+    branches = sorted(b["name"] for b in (br or [])
+                      if b.get("name") and b["name"] != default_branch)
+    return branches, _latest_vtag(tg or [])
+
+
+def fetch_extras(entries, workers=8):
+    """Parallel per-repo branches+tags fetch.
+
+    ``entries``: list of ``(repo name, default branch)``. Returns a dict
+    ``name -> (branches, latest_vtag)``. ~2 calls per repo at ~5 calls/s
+    global pacing -> well under the 4-minute build budget for ~60 repos.
+    """
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(
+            lambda e: _fetch_repo_extras(e[0], e[1]), entries))
+    return dict(zip([e[0] for e in entries], results))
+
+
 # --- classification helpers --------------------------------------------------
 
 
 def _classify(repo):
-    """Return the display area key for ``repo``, or None to exclude it.
+    """Return the display category key for ``repo``, or None to exclude it.
 
-    Rules (design spec): archived -> excluded; any excluded area topic ->
-    excluded; otherwise the first teaching area in INCLUDE_AREAS order;
-    a repo with no teaching area but the ``fmt-ipynb`` topic falls back to
-    the pseudo-area ``ipynb``.
+    Rules (user spec, evaluated in this order):
+      archived -> excluded;
+      FORCED_SAMPLES name -> ``sample`` (name wins over topics);
+      ``fmt-ipynb`` topic -> ``notebook`` (ipynb wins over area);
+      ``area-lecture`` -> ``lecture``;
+      ``area-sample`` -> ``sample``;
+      anything else -> excluded.
     """
     if repo.get("archived"):
         return None
+    name = (repo.get("name") or "").lower()
+    if name in FORCED_SAMPLES:
+        return "sample"
     topics = repo.get("topics") or []
-    areas = {t[len("area-"):] for t in topics if t.startswith("area-")}
-    if areas & set(EXCLUDE_AREAS):
-        return None
-    for area in INCLUDE_AREAS:
-        if area in areas:
-            return area
     if "fmt-ipynb" in topics:
-        return IPYNB_AREA
+        return "notebook"
+    areas = {t[len("area-"):] for t in topics if t.startswith("area-")}
+    if "lecture" in areas:
+        return "lecture"
+    if "sample" in areas:
+        return "sample"
     return None
 
 
@@ -539,13 +602,13 @@ def _gen_date_fr(iso_utc):
 
 def _render_card(c):
     """Return the <article> for one catalog entry ``c``."""
-    area = c["area"]
+    cat = c["category"]
     muted = " opacity-60" if c["status"] in STATUS_MUTED else ""
     esc_name = html.escape(c["name"])
     esc_desc = html.escape(c["description"] or "")
     parts = [
         '<article data-area="%s" class="card %s border rounded-xl p-4 '
-        'flex flex-col%s">' % (area, AREA_CARD[area], muted),
+        'flex flex-col%s">' % (cat, CATEGORY_CARD[cat], muted),
         '<h3 class="font-semibold text-slate-900 leading-snug break-words">'
         '%s</h3>' % esc_name,
         '<p class="mt-1 text-sm text-slate-600 line-clamp-2">%s</p>'
@@ -553,31 +616,71 @@ def _render_card(c):
         '<div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] '
         'font-medium">',
         '<span class="px-2 py-0.5 rounded-full %s">%s</span>'
-        % (AREA_CHIP[area], AREA_LABELS[area]),
+        % (CATEGORY_CHIP[cat], CATEGORY_LABELS[cat]),
     ]
     if c["status"]:
         label = STATUS_LABELS.get(c["status"], html.escape(c["status"]))
         parts.append(
             '<span class="px-2 py-0.5 rounded-full bg-white/70 '
             'text-slate-700">%s</span>' % label)
-    if c["ipynb"]:
+    if c["ipynb"] and cat != "notebook":
         parts.append(
             '<span class="w-2 h-2 rounded-full bg-orange-300" '
             'title="Contenu Jupyter (ipynb)"></span>')
     parts.append("</div>")
-    links = []
-    if c["site_url"]:
-        links.append('<a class="underline-offset-2 hover:underline '
-                     'text-slate-800" href="%s">Site</a>' % c["site_url"])
-    links.append('<a class="underline-offset-2 hover:underline '
-                 'text-slate-800" href="%s">Source</a>' % c["github_url"])
+
+    # Pill buttons (spec tints: Develop sky, Stable emerald, Source violet,
+    # Branches amber). All three displayed categories are Quarto
+    # render-callers, so Site · Develop appears on every card.
+    btn = ("inline-flex items-center gap-1 px-2.5 py-1 rounded-full "
+           "text-[11px] font-medium border no-underline")
+    links = [
+        '<a class="%s bg-sky-200/70 border-sky-300 text-sky-900 '
+        'hover:bg-sky-200" href="%s/%s/develop/" target="_blank" '
+        'rel="noopener">↗ Site · Develop</a>' % (btn, SITE_BASE, c["name"]),
+    ]
+    # Site · Stable points at the canonical ``stable/`` pointer path
+    # (written by the deploy-static job of _quarto-utils v1.3.23+ on v* tag
+    # deploys) instead of a per-tag releases/<v>/ URL: one stable address.
+    # The button only appears when the repo actually has a v* tag; repos
+    # whose last tag-deploy predates the v1.3.23 rollout have no server-side
+    # stable/ dir -> dead-link risk accepted per user spec.
+    if c["latest_vtag"]:
+        links.append(
+            '<a class="%s bg-emerald-200/70 border-emerald-300 '
+            'text-emerald-900 hover:bg-emerald-200" title="Dernière '
+            'version : %s" href="%s/%s/stable/" target="_blank" '
+            'rel="noopener">★ Site · Stable</a>'
+            % (btn, html.escape(c["latest_vtag"]), SITE_BASE, c["name"]))
+    links.append(
+        '<a class="%s bg-violet-200/70 border-violet-300 text-violet-900 '
+        'hover:bg-violet-200" href="%s" target="_blank" '
+        'rel="noopener">↗ Source</a>' % (btn, c["github_url"]))
+    # Branches ▾: zero-JS <details> dropdown of the non-default branches,
+    # each linking the previews/<sanitized>/ path (branch "/" -> "-").
+    # Hidden when the fetch failed or the repo has no non-default branch.
+    if c["branches"]:
+        items = "".join(
+            '<a class="block px-3 py-1 text-xs text-slate-700 '
+            'hover:bg-amber-50 no-underline whitespace-nowrap" '
+            'href="%s/%s/previews/%s/" target="_blank" '
+            'rel="noopener">⎇ %s</a>'
+            % (SITE_BASE, c["name"],
+               html.escape(b.replace("/", "-")), html.escape(b))
+            for b in c["branches"])
+        links.append(
+            '<details class="relative"><summary class="%s bg-amber-200/70 '
+            'border-amber-300 text-amber-900 hover:bg-amber-200 '
+            'cursor-pointer select-none">⎇ Branches ▾</summary>'
+            '<div class="absolute left-0 bottom-full z-20 mb-1 max-h-64 '
+            'overflow-y-auto w-max bg-white border border-amber-300 '
+            'rounded-lg shadow-lg">%s</div></details>' % (btn, items))
     updated = ("Mis à jour %s" % c["updated"]) if c["updated"] else ""
     parts.append(
-        '<footer class="mt-auto pt-3 text-xs flex items-center gap-3 '
-        'text-slate-600">%s%s</footer>'
-        % ("".join(links),
-           ('<span class="ml-auto whitespace-nowrap">%s</span>' % updated)
-           if updated else ""))
+        '<footer class="mt-auto pt-3">'
+        '<div class="flex flex-wrap items-center gap-1.5">%s</div>'
+        '<div class="mt-2 text-[11px] text-slate-500">%s</div>'
+        "</footer>" % ("".join(links), updated))
     parts.append("</article>")
     return "\n      ".join(parts)
 
@@ -585,37 +688,37 @@ def _render_card(c):
 def _render_index(cards, generated_at):
     """Return the full index.html source (Tailwind Play CDN delivery)."""
     count = len(cards)
-    # Filter chips: "Tous" + each area present, in INCLUDE_AREAS order.
-    order = list(INCLUDE_AREAS) + [IPYNB_AREA]
-    present = [a for a in order if any(c["area"] == a for c in cards)]
-    tally = {a: sum(1 for c in cards if c["area"] == a) for a in present}
+    # Filter chips: exactly "Tous · Lecture · Notebook · Samples" (user spec),
+    # with live counts per category.
+    tally = {a: sum(1 for c in cards if c["category"] == a)
+             for a in CATEGORIES}
     chip_btns = [
         '<button data-filter="all" class="px-3 py-1 rounded-full text-sm '
         'bg-slate-800 text-white ring-2 ring-slate-800">Tous (%d)</button>'
         % count]
-    for a in present:
+    for a in CATEGORIES:
         chip_btns.append(
             '<button data-filter="%s" class="px-3 py-1 rounded-full text-sm '
             'bg-white border border-slate-300 text-slate-700 '
             'hover:bg-slate-100">%s (%d)</button>'
-            % (a, AREA_LABELS[a], tally[a]))
+            % (a, CATEGORY_LABELS[a], tally[a]))
     grid = "\n      ".join(_render_card(c) for c in cards)
     return """<!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Catalogue ebpro — Supports pédagogiques</title>
+  <title>Supports pédagogiques · Catalogue ebpro</title>
   <!-- Tailwind Play CDN (v1 pragmatique : page statique régénérée par cron).
        Swap to compiled CSS when a build step lands. -->
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>summary::-webkit-details-marker { display: none; }</style>
 </head>
 <body class="bg-slate-50 text-slate-800 antialiased">
   <header class="max-w-7xl mx-auto px-4 pt-10 pb-4">
     <h1 class="text-3xl font-semibold tracking-tight text-slate-900">
-      Catalogue ebpro</h1>
-    <p class="mt-1 text-slate-500">Supports pédagogiques de l'organisation
-      ebpro — cours, samples et références.</p>
+      Supports pédagogiques</h1>
+    <p class="mt-1 text-slate-500">Catalogue ebpro</p>
     <p class="mt-1 text-sm text-slate-400">%d supports</p>
   </header>
   <nav aria-label="Filtres" id="filters"
@@ -636,7 +739,7 @@ def _render_index(cards, generated_at):
        >teaching-catalog</a>
   </footer>
   <script>
-    // Filtres par aire, bascule client-side sans dépendance.
+    // Filtres par catégorie, bascule client-side sans dépendance.
     const buttons = document.querySelectorAll('#filters button');
     const cards = document.querySelectorAll('#grid .card');
     buttons.forEach(btn => btn.addEventListener('click', () => {
@@ -685,29 +788,37 @@ def main():
 
     cards = []
     for r in all_repos:
-        area = _classify(r)
-        if area is None:
+        cat = _classify(r)
+        if cat is None:
             continue
-        site_url = (
-            "%s/%s/develop/" % (SITE_BASE, r["name"])
-            if area in RENDER_CALLER_AREAS else None)
         cards.append({
             "name": r["name"],
             "description": r.get("description"),
             "topics": r.get("topics") or [],
-            "area": area,
+            "category": cat,
+            "default_branch": r.get("default_branch"),
             "status": _status_of(r),
             "ipynb": "fmt-ipynb" in (r.get("topics") or []),
             "pushed_at": r.get("pushed_at"),
             "updated": _relative_fr(r.get("pushed_at")),
-            "site_url": site_url,
             "github_url": r.get("html_url")
                           or "https://github.com/%s/%s" % (ORG, r["name"]),
         })
 
-    # Group by area (teaching order first), then alphabetical within an area.
-    order = {a: i for i, a in enumerate(INCLUDE_AREAS + (IPYNB_AREA,))}
-    cards.sort(key=lambda c: (order[c["area"]], c["name"]))
+    # Per-repo branches + v* tags for the footer buttons (ThreadPool(8),
+    # 2 REST calls per displayed repo; failures hide the buttons).
+    extras_started = time.time()
+    extras = fetch_extras([(c["name"], c["default_branch"]) for c in cards])
+    for c in cards:
+        branches, latest_vtag = extras.get(c["name"], ([], None))
+        c["branches"] = branches
+        c["latest_vtag"] = latest_vtag
+    print("Branches/tags: %d repos in %.1fs" %
+          (len(cards), time.time() - extras_started))
+
+    # Group by category (Lecture, Notebook, Samples), then alphabetical.
+    order = {a: i for i, a in enumerate(CATEGORIES)}
+    cards.sort(key=lambda c: (order[c["category"]], c["name"]))
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
