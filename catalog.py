@@ -8,26 +8,43 @@ self-contained static card grid of the teaching surface under ``./public/``:
     ``lecture-`` -> Lecture, ``notebook-`` -> Notebook, ``sample-`` ->
     Samples (+ FORCED_SAMPLES names); archived repos, repos carrying the
     ``status-legacy`` topic and non-matching names are excluded entirely,
-  * card content (v5 sober mobile-first layout): a meta row with the
+  * card content (v6 sober mobile-first layout): a meta row with the
     category label + status chip (colour-coded, dark text on light tint),
     the human description as the primary line (2-line clamp) and the repo
     name as a small monospace secondary line, verbatim GitHub topic
-    pastilles (neutral chips, area-* omitted), a 44px-tap-target links
-    footer: ``Stable`` (solid accent, only when the repo has a ``v*``
-    tag) BEFORE ``Latest``, ``Source`` (public repos only) and a
-    ``Branches`` <details> disclosure (native, works without JS), plus the
-    last-update date (absolute short French date at build time, rewritten
-    to "il y a X" by JS when available). Filters: sticky slim header with
-    live search; filter panel collapsed behind a "Filtres" toggle below
-    lg, inline from lg up; category segmented control (aria-pressed) +
-    topic checkbox dropdown (AND semantics) + result count; vanilla JS,
-    visibility via the Tailwind ``hidden`` utility (safe now that the
+    pastilles (neutral chips, area-* omitted) rendered as filter TOGGLE
+    buttons, and a uniform action row that ALWAYS shows the 4 slots
+    ``Stable · Latest · Branches · Source`` in that order: a missing
+    target renders as a disabled placeholder (unfocusable
+    ``<span class="lnk lnk-disabled" aria-disabled="true">`` with an
+    explanatory ``title``, same box size as the enabled slots), never a
+    hidden slot. Stable (solid accent) is enabled only when the repo has
+    a ``v*`` tag; Branches is the native <details> disclosure (enabled
+    only with >=1 non-default branch); Source links public repos only.
+    Enabled slots keep the >=44px tap targets. The date line is an
+    ABSOLUTE short French date inside ``<time datetime>`` (full ISO in
+    the datetime attribute and the title) — no clock-dependent JS text
+    anywhere (v6 removed the "il y a X" rewrite: it drifted between
+    builds, user complaint).
+  * filters: sticky slim header with live search; filter panel collapsed
+    behind a "Filtres" toggle below lg, inline from lg up; category
+    segmented control (aria-pressed), sort select (JS reorders the
+    <article> nodes, build order is the default) and result count.
+    Topics are filtered by CLICKING the pastilles on the cards (AND
+    intersection semantics; one Set is the single source of truth); an
+    "Filtres actifs" chip row (a removable × chip per active
+    topic/category/search + "Tout effacer") appears when anything is
+    active. Sort and pill-toggling are progressive enhancement: with JS
+    blocked the cards, links, uniform action row and Branches
+    disclosures remain fully usable and the pastilles are inert labels.
+    Visibility via the Tailwind ``hidden`` utility (safe now that the
     daisyUI .card{display:flex} override is gone).
 
 Branch/tag data is fetched per displayed repo (2 REST calls each,
-ThreadPool(8)); a per-repo fetch failure degrades silently to hiding the
-matching button. Site URLs are NOT probed at build time; a stale link is
-acceptable (see the stable-pointer note in _render_card).
+ThreadPool(8)); a per-repo fetch failure degrades to a DISABLED placeholder
+slot (the action row stays uniform, see _render_card). Site URLs are NOT
+probed at build time; a stale link is acceptable (see the stable-pointer
+note in _render_card).
 
 Styling is a purged Tailwind v3 stylesheet built AT CI BUILD TIME from
 ``inputs.css`` + ``tailwind.config.js`` (content = this file) into
@@ -585,9 +602,11 @@ MONTHS_FR = ("janv.", "févr.", "mars", "avr.", "mai", "juin",
 def _abs_date_fr(iso):
     """``2026-10-14T08:12:00Z`` -> ``14 oct. 2026`` (absolute, build-time).
 
-    Spec v4: the visible text is the ABSOLUTE date (never goes stale between
-    the 6h cron runs); the JS enhances it to "il y a X" at load when
-    available, reading the ``data-pushed`` ISO attribute rendered alongside.
+    Spec v6: the visible text is the ABSOLUTE date only (accurate at any
+    read time). The v4/v5 JS rewrite to "il y a X" was removed: it drifted
+    between builds (the page is static, the clock is not — user complaint).
+    The full ISO timestamp travels in the ``datetime``/``title`` attributes
+    of the rendered ``<time>`` element.
     """
     try:
         dt = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ")
@@ -621,18 +640,41 @@ def _status_chip(status, muted=False):
 # --- rendering ---------------------------------------------------------------
 
 
+def _disabled_slot(label, title):
+    """Disabled action-slot placeholder (spec v6, uniform card row).
+
+    Rendered as an unfocusable ``<span>`` (NOT ``<button disabled>``:
+    disabled buttons drop out of the tab order but keep hover styling
+    traps; the span is inert by construction). Same box as ``.lnk``
+    (min-height 44px, border, padding) so the row stays visually
+    uniform; ``.lnk-disabled`` recolors to slate-500 on white (AA for
+    4.5:1 body text) and cancels the ``.lnk`` hover shift. ``title``
+    explains the absence (e.g. "Aucune branche").
+    """
+    return ('<span class="lnk lnk-disabled" aria-disabled="true" '
+            'title="%s">%s</span>' % (html.escape(title, quote=True),
+                                      html.escape(label)))
+
+
 def _render_card(c):
-    """Return the <article> for one catalog entry ``c`` (v5 sober layout).
+    """Return the <article> for one catalog entry ``c`` (v6 sober layout).
 
     Hierarchy: a meta row (category label + status chip), then the human
     description as the primary line (line-clamp-2, links to the primary
     site path); the repo name as a small monospace secondary line linking
     GitHub (fallback: with no description, the name becomes the primary
-    line). Topics are neutral monospace pastilles (area-* omitted, the
-    category is labelled in the meta row). Footer links (Stable BEFORE
-    Latest per spec v4, Source for public repos, Branches <details>
-    disclosure) are >=44px tap targets. The date line carries
-    ``data-pushed`` (ISO) + the absolute short French date.
+    line). Topics are neutral monospace pastilles rendered as filter
+    TOGGLE buttons (``data-topic`` + ``aria-pressed``; the JS toggles
+    them into the active topic set — progressive enhancement, inert
+    labels without JS). The footer is a UNIFORM 4-slot action row,
+    always in the order Stable · Latest · Branches · Source (spec v6):
+    an unavailable target (no v* tag / no non-default branch / private
+    repo) renders a disabled placeholder slot instead of disappearing.
+    Enabled slots are >=44px tap targets. The date line is an absolute
+    short French date inside ``<time datetime>`` (full ISO in the
+    datetime/title attributes, no JS clock text). ``data-title`` (lower-
+    cased name) and ``data-ts`` (pushed_at ISO) on the <article> back the
+    JS sort control.
     """
     cat = c["category"]
     # Muted statuses (frozen/duplicate) are de-emphasised LOCALLY: a neutral
@@ -649,10 +691,16 @@ def _render_card(c):
     # this plain attribute -> no JSON-in-attribute quoting bug class.
     esc_search = html.escape(
         (c["name"] + " " + (c["description"] or "")).lower(), quote=True)
+    # Sort keys baked as data attributes (spec v6 item 3): data-title =
+    # lowercased repo name (stable lexicographic key), data-ts = pushed_at
+    # ISO (chronological key). Both quote-escaped; missing values -> "".
+    esc_ts = html.escape(c["pushed_at"] or "", quote=True)
     parts = [
         '<article data-area="%s" data-topics="%s" data-search="%s" '
+        'data-title="%s" data-ts="%s" '
         'class="card rounded-lg border border-slate-200 p-4 shadow-sm">'
-        % (cat, esc_topics, esc_search),
+        % (cat, esc_topics, esc_search,
+           html.escape(c["name"].lower(), quote=True), esc_ts),
         '<div class="flex flex-wrap items-center gap-2">'
         '<span class="text-[13px] font-medium uppercase tracking-wide '
         'text-slate-600">%s</span>%s</div>'
@@ -679,41 +727,51 @@ def _render_card(c):
             'class="mt-1 block break-all text-base font-semibold '
             'text-slate-900 hover:text-indigo-700 hover:underline">'
             '%s</a>' % (primary_url, esc_name))
-    # Topic pastilles: actual GitHub topics verbatim (no synthetic labels),
-    # minus area-*, as neutral monospace chips (single-accent palette).
+    # Topic pastilles = filter TOGGLES (spec v6 item 4): actual GitHub
+    # topics verbatim (no synthetic labels), minus area-*, as neutral
+    # monospace BUTTONS carrying data-topic + aria-pressed="false". The
+    # JS toggles the topic into the single active-topic Set and syncs
+    # every same-topic pill on every card (pressed style: chip-pill-active
+    # + aria-pressed). Without JS they are inert labels (progressive
+    # enhancement) — the card content and links stay fully usable.
     pills = [t for t in c["topics"]
              if not t.startswith(BADGE_EXCLUDED_PREFIXES)]
     if pills:
         parts.append(
             '<div class="mt-3 flex flex-wrap gap-1">%s</div>'
-            % "".join('<span class="chip chip-topic">%s</span>'
-                      % html.escape(t) for t in pills))
+            % "".join(
+                '<button type="button" class="chip chip-topic" '
+                'data-topic="%s" aria-pressed="false" '
+                'title="Filtrer sur le thème : %s">%s</button>'
+                % (html.escape(t, quote=True), html.escape(t, quote=True),
+                   html.escape(t))
+                for t in pills))
 
-    # Footer links. Stable FIRST (spec v4), solid accent, only when the
-    # repo has a v* tag; points at the canonical ``stable/`` pointer path
-    # written by the deploy-static job (v1.3.23+) on v* tag deploys.
+    # Uniform action row (spec v6 item 1): ALWAYS the 4 slots in the order
+    # Stable · Latest · Branches · Source. A missing target is a disabled
+    # placeholder (unfocusable span, aria-disabled, explanatory title),
+    # never a hidden slot, so every card row has the same shape.
     links = []
+    # Stable: solid accent, only enabled when the repo has a v* tag; points
+    # at the canonical ``stable/`` pointer path written by the deploy-static
+    # job (v1.3.23+) on v* tag deploys.
     if c["latest_vtag"]:
         links.append(
             '<a class="lnk lnk-primary" title="Dernière version : %s" '
             'href="%s/%s/stable/" target="_blank" rel="noopener">'
             'Stable</a>'
             % (html.escape(c["latest_vtag"]), SITE_BASE, c["name"]))
-    # Latest = the develop render (every card: all three categories are
+    else:
+        links.append(_disabled_slot("Stable", "Aucune version publiée"))
+    # Latest = the develop render (always enabled: all three categories are
     # Quarto render-callers).
     links.append(
         '<a class="lnk" href="%s/%s/develop/" target="_blank" '
         'rel="noopener">Latest</a>' % (SITE_BASE, c["name"]))
-    # Source only for public repos (user requirement, spec v3 item 6).
-    if not c["private"]:
-        links.append(
-            '<a class="lnk" href="%s" target="_blank" '
-            'rel="noopener">Source</a>' % c["github_url"])
     # Branches: native <details> disclosure of the non-default branches,
     # each linking the previews/<sanitized>/ path (branch "/" -> "-").
-    # Hidden when the fetch failed or the repo has no non-default branch.
-    # (Replaces the v4 hover dropdown: keyboard- and touch-accessible,
-    # works with JS blocked.)
+    # Disabled placeholder when the fetch failed or the repo has no
+    # non-default branch (works without JS either way).
     if c["branches"]:
         items = "".join(
             '<li><a class="block min-h-11 whitespace-nowrap px-3 py-3 font-mono '
@@ -729,31 +787,47 @@ def _render_card(c):
             'aria-expanded="false">Branches</summary>'
             '<ul class="dd-list max-h-64 overflow-y-auto py-1">%s</ul>'
             '</details>' % items)
+    else:
+        links.append(_disabled_slot("Branches", "Aucune branche"))
+    # Source: link for public repos (user requirement, spec v3 item 6);
+    # disabled labeled placeholder for private ones.
+    if not c["private"]:
+        links.append(
+            '<a class="lnk" href="%s" target="_blank" '
+            'rel="noopener">Source</a>' % c["github_url"])
+    else:
+        links.append(_disabled_slot("Source", "Dépôt privé"))
     parts.append(
         '<footer class="mt-4 flex flex-wrap items-center gap-2">%s</footer>'
         % "".join(links))
-    # Date: absolute short French date visible (accurate at any read time);
-    # data-pushed ISO lets the JS rewrite it to "il y a X" when available.
+    # Date: ABSOLUTE short French date, build-time baked (spec v6 item 2).
+    # The <time> element carries the full ISO timestamp in datetime (and
+    # title as a plain-text fallback); no JS rewrites clock-dependent text
+    # anywhere on the card.
     abs_date = _abs_date_fr(c["pushed_at"])
     if abs_date:
         parts.append(
-            '<div class="mt-3 text-[13px] %s" '
-            'data-pushed="%s">Mis à jour %s</div>'
-            % (meta_text, html.escape(c["pushed_at"], quote=True),
-               html.escape(abs_date)))
+            '<div class="mt-3 text-[13px] %s">Mis à jour '
+            '<time datetime="%s" title="%s">%s</time></div>'
+            % (meta_text, esc_ts, esc_ts, html.escape(abs_date)))
     parts.append("</article>")
     return "\n      ".join(parts)
 
 
 def _render_index(cards, generated_at):
-    """Return the full index.html source (v5: purged local app.css, no CDN).
+    """Return the full index.html source (v6: purged local app.css, no CDN).
 
     The stylesheet is generated at CI build time from inputs.css +
     tailwind.config.js into public/app.css and linked relatively (the page
     is deployed flat under catalog/, so "app.css" resolves next to
     index.html). Layout is mobile-first: sticky 56px header carrying the
     live search, filter panel collapsed behind a "Filtres" toggle below lg
-    and inline from lg up, 1/2/3-column card grid.
+    and inline from lg up, 1/2/3-column card grid. The panel holds the
+    category segmented control, the sort select and the result count
+    (spec v6: the topic checkbox dropdown is gone — topics are filtered
+    by clicking the pastilles on the cards); an "Filtres actifs" chip row
+    sits between the panel and the grid, shown by JS when any
+    topic/category/search filter is active.
     """
     count = len(cards)
     # Category segmented control: real buttons, the selected one marked
@@ -769,23 +843,6 @@ def _render_index(cards, generated_at):
             '<button type="button" data-cat="%s" aria-pressed="false" '
             'class="f-btn">%s (%d)</button>'
             % (a, CATEGORY_LABELS[a], tally[a]))
-    # Topic filter: ALL non-area-* topics as real checkboxes in a native
-    # <details> disclosure, sorted by frequency (most used first), with
-    # per-topic counts.
-    freq = {}
-    for c in cards:
-        for t in c["topics"]:
-            if not t.startswith(BADGE_EXCLUDED_PREFIXES):
-                freq[t] = freq.get(t, 0) + 1
-    all_topics = sorted(freq, key=lambda t: (-freq[t], t))
-    topic_items = "".join(
-        '<li><label class="flex min-h-11 items-center gap-2 px-3 py-2 '
-        'font-mono text-[13px] text-slate-700 hover:bg-slate-100">'
-        '<input type="checkbox" class="h-4 w-4 shrink-0 accent-indigo-700" '
-        'data-topic="%s">%s<span class="ml-auto pl-3 text-slate-600">'
-        '%d</span></label></li>'
-        % (html.escape(t), html.escape(t), freq[t])
-        for t in all_topics)
     grid = "\n      ".join(_render_card(c) for c in cards)
     return """<!DOCTYPE html>
 <html lang="fr">
@@ -821,18 +878,31 @@ def _render_index(cards, generated_at):
         <div role="group" aria-label="Catégorie" class="flex flex-wrap gap-2">
           %s
         </div>
-        <details class="dd">
-          <summary class="f-btn chev" aria-expanded="false">Thèmes (<span id="topic-sel-count">0</span>)</summary>
-          <ul class="dd-list max-h-80 overflow-y-auto py-1">
-            %s
-          </ul>
-        </details>
         <div class="flex flex-wrap items-center gap-3 lg:ml-auto">
+          <label class="flex items-center gap-2 text-sm font-medium text-slate-600">Trier
+            <select id="f-sort"
+                    class="h-11 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700">
+              <option value="">Défaut (catégorie)</option>
+              <option value="title-asc">Titre A→Z</option>
+              <option value="title-desc">Titre Z→A</option>
+              <option value="date-desc">Date récente</option>
+              <option value="date-asc">Date ancienne</option>
+            </select>
+          </label>
           <button id="f-reset" type="button" class="f-btn">Réinitialiser</button>
           <span id="result-count" class="chip chip-neutral font-mono">%d/%d</span>
         </div>
       </div>
     </nav>
+    <!-- Filtres actifs (spec v6 item 4): shown by JS when a topic, the
+         category or the search is active; each active filter is a
+         removable × chip built by JS from DOM nodes (no innerHTML, so no
+         injection surface). Hidden state = the "hidden" utility. -->
+    <div id="active-filters" class="hidden flex flex-wrap items-center gap-2 py-2">
+      <span class="text-[13px] font-medium uppercase tracking-wide text-slate-600">Filtres actifs :</span>
+      <span id="active-filters-chips" class="flex flex-wrap items-center gap-2"></span>
+      <button id="af-clear" type="button" class="chip chip-filter-x">Tout effacer</button>
+    </div>
     <div id="grid"
          class="grid grid-cols-1 gap-4 py-6 sm:grid-cols-2 lg:grid-cols-3">
       %s
@@ -846,35 +916,30 @@ def _render_index(cards, generated_at):
     <span>Contact : <a class="text-indigo-700 hover:underline" href="mailto:emmanuel.bruno@univ-tln.fr">emmanuel.bruno@univ-tln.fr</a></span>
   </footer>
   <script>
-    // Filtres v5 : recherche + catégorie (groupe exclusif, état porté par
-    // aria-pressed) + thèmes (AND) — composition identique à la v4.
-    // La visibilité des cartes est pilotée par la classe utilitaire
-    // "hidden" (display:none), sans feuille de style tierce : daisyUI est
-    // retiré, plus de .card{display:flex} qui écrasait "hidden" en v3/v4.
-    const cards = [...document.querySelectorAll('#grid article')];
+    // Filtres v6 : recherche + catégorie (groupe exclusif, aria-pressed)
+    // + thèmes activés par les PASTILLES des cartes (intersection AND, un
+    // seul Set "activeTopics" comme source de vérité) + tri JS (replace
+    // les <article> dans le DOM). La visibilité des cartes est pilotée
+    // par la classe utilitaire "hidden" (display:none). Enrichissement
+    // progressif : sans JS, cartes/liens/dépliants Branches restent
+    // pleinement utilisables, les pastilles sont des étiquettes inertes
+    // et l'ordre de construction (catégorie puis nom) s'applique.
+    // Les dates sont absolues au build : AUCUN texte dépendant de
+    // l'horloge n'est généré côté client (la réécriture relative v4/v5
+    // dérivait entre deux déploiements — retirée en v6).
+    const grid = document.getElementById('grid');
+    const cards = [...grid.querySelectorAll('article')];
+    const originalOrder = [...cards];      // ordre de construction (reset du tri)
     const catBtns = [...document.querySelectorAll('#filters [data-cat]')];
-    const topicBoxes = [...document.querySelectorAll('#filters [data-topic]')];
     const search = document.getElementById('f-search');
     const countEl = document.getElementById('result-count');
-    const selCountEl = document.getElementById('topic-sel-count');
     const emptyEl = document.getElementById('empty');
+    const sortSel = document.getElementById('f-sort');
+    const afWrap = document.getElementById('active-filters');
+    const afChips = document.getElementById('active-filters-chips');
     const total = cards.length;
     let cat = "all";
-
-    // Dates : la page est livrée avec la date absolue (juste sans JS) ;
-    // si JS est disponible on la remplace par "il y a X" (jamais périmé).
-    function relFr(iso) {
-      const s = (Date.now() - new Date(iso).getTime()) / 1000;
-      if (s < 3600) return "il y a " + Math.max(1, Math.floor(s / 60)) + " min";
-      if (s < 86400) return "il y a " + Math.floor(s / 3600) + " h";
-      const d = s / 86400;
-      if (d < 31) return "il y a " + Math.floor(d) + " j";
-      if (d < 365) return "il y a " + Math.floor(d / 7) + " sem";
-      return d < 730 ? "il y a 1 an" : "il y a " + Math.floor(d / 365) + " ans";
-    }
-    document.querySelectorAll('[data-pushed]').forEach(el => {
-      el.textContent = "Mis à jour " + relFr(el.dataset.pushed);
-    });
+    const activeTopics = new Set();
 
     // <details>/<summary> : aria-expanded synchronisé sur l'état natif.
     document.querySelectorAll('details').forEach(d => {
@@ -883,10 +948,10 @@ def _render_index(cards, generated_at):
         s.setAttribute("aria-expanded", String(d.open)));
     });
 
-    // Recalcule tout l'état visible depuis les data-attributs du DOM.
+    // Filtre AND : catégorie x recherche x intersection des thèmes.
     function applyFilters() {
       const q = (search.value || "").trim().toLowerCase();
-      const sel = topicBoxes.filter(b => b.checked).map(b => b.dataset.topic);
+      const sel = [...activeTopics];
       let visible = 0;
       cards.forEach(c => {
         const topics = (c.dataset.topics || "").split(" ");
@@ -897,25 +962,125 @@ def _render_index(cards, generated_at):
         if (ok) visible++;
       });
       countEl.textContent = visible + "/" + total;
-      selCountEl.textContent = String(sel.length);
       emptyEl.classList.toggle("hidden", visible !== 0);
     }
-    catBtns.forEach(b => b.addEventListener("click", () => {
-      cat = b.dataset.cat;
-      catBtns.forEach(x =>
-        x.setAttribute("aria-pressed", String(x === b)));
+
+    // Tri (spec v6 item 3) : réordonne TOUTES les cartes (visibles et
+    // masquées) en déplaçant les <article> existants, puis rejoue les
+    // filtres. Clés = data-title (nom minuscule) / data-ts (ISO pushed_at,
+    // tri lexicographique = tri chronologique). Aucun : "value" vide =
+    // ordre de construction. Pas d'animation (préférence sobre + pas de
+    // conflit prefers-reduced-motion).
+    function applySort() {
+      const mode = sortSel.value;
+      const list = [...cards];
+      if (mode) {
+        const key = mode.startsWith("title")
+          ? (c => c.dataset.title || "")
+          : (c => c.dataset.ts || "");
+        list.sort((a, b) => {
+          const ka = key(a), kb = key(b);
+          const r = ka < kb ? -1 : (ka > kb ? 1 : 0);
+          return mode.endsWith("-desc") ? -r : r;
+        });
+      } else {
+        list.sort((a, b) =>
+          originalOrder.indexOf(a) - originalOrder.indexOf(b));
+      }
+      list.forEach(c => grid.appendChild(c));
       applyFilters();
-    }));
-    search.addEventListener("input", applyFilters);
-    topicBoxes.forEach(b => b.addEventListener("change", applyFilters));
-    document.getElementById("f-reset").addEventListener("click", () => {
-      search.value = "";
-      topicBoxes.forEach(b => { b.checked = false; });
-      cat = "all";
+    }
+
+    // Reflète l'état du Set sur TOUTES les pastilles du même thème
+    // (aria-pressed = état, chip-pill-active = style pressé).
+    function syncPills() {
+      grid.querySelectorAll("button[data-topic]").forEach(p => {
+        const on = activeTopics.has(p.dataset.topic);
+        p.setAttribute("aria-pressed", String(on));
+        p.classList.toggle("chip-pill-active", on);
+      });
+    }
+
+    // Puce "Filtres actifs" retirables : noeuds DOM construits à la main
+    // (createElement/textContent, jamais innerHTML) -> pas de surface
+    // d'injection même pour les valeurs saisies dans la recherche.
+    function xChip(labelText, ariaPrefix, onRemove) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "chip chip-filter-x";
+      b.setAttribute("aria-label", ariaPrefix + " " + labelText);
+      b.textContent = labelText;
+      const x = document.createElement("span");
+      x.className = "ml-2";
+      x.setAttribute("aria-hidden", "true");
+      x.textContent = "\u00d7";
+      b.appendChild(x);
+      b.addEventListener("click", onRemove);
+      return b;
+    }
+
+    function renderActiveFilters() {
+      afChips.textContent = "";
+      const q = (search.value || "").trim();
+      if (cat !== "all") {
+        const btn = catBtns.find(b => b.dataset.cat === cat);
+        const label = btn ? btn.textContent.split(" (")[0] : cat;
+        afChips.appendChild(xChip(label, "Retirer la catégorie",
+          () => setCat("all")));
+      }
+      if (q) {
+        afChips.appendChild(xChip(q, "Retirer la recherche", () => {
+          search.value = "";
+          update();
+        }));
+      }
+      [...activeTopics].sort().forEach(t => {
+        afChips.appendChild(xChip(t, "Retirer le thème", () => {
+          activeTopics.delete(t);
+          update();
+        }));
+      });
+      afWrap.classList.toggle("hidden",
+        cat === "all" && !q && activeTopics.size === 0);
+    }
+
+    function update() {
+      syncPills();
+      renderActiveFilters();
+      applyFilters();
+    }
+
+    function setCat(v) {
+      cat = v;
       catBtns.forEach(x =>
-        x.setAttribute("aria-pressed", String(x.dataset.cat === "all")));
+        x.setAttribute("aria-pressed", String(x.dataset.cat === v)));
+      update();
+    }
+
+    catBtns.forEach(b => b.addEventListener("click", () => setCat(b.dataset.cat)));
+    search.addEventListener("input", () => {
+      renderActiveFilters();
       applyFilters();
     });
+    sortSel.addEventListener("change", applySort);
+    // Pastille de carte = bascule du thème dans le filtre actif
+    // (mêmes sémantiques d'intersection que les puces × qui retirent
+    // du même Set — source de vérité unique).
+    grid.addEventListener("click", e => {
+      const p = e.target.closest("button[data-topic]");
+      if (!p) return;
+      const t = p.dataset.topic;
+      if (activeTopics.has(t)) activeTopics.delete(t);
+      else activeTopics.add(t);
+      update();
+    });
+    function clearFilters() {
+      search.value = "";
+      activeTopics.clear();
+      setCat("all");   // -> update() complet (puces + pastilles + filtres)
+    }
+    document.getElementById("f-reset").addEventListener("click", clearFilters);
+    document.getElementById("af-clear").addEventListener("click", clearFilters);
     // Panneau de filtres : masqué sous lg derrière le bouton "Filtres"
     // (aria-expanded), inline dès lg (classes lg:* — visible même sans JS).
     const fToggle = document.getElementById("f-toggle");
@@ -924,10 +1089,11 @@ def _render_index(cards, generated_at):
       const open = fBody.classList.toggle("hidden") === false;
       fToggle.setAttribute("aria-expanded", String(open));
     });
+    update();   // puces × synchronisées sur l'état initial (rangée masquée)
   </script>
 </body>
 </html>
-""" % ("\n          ".join(chip_btns), topic_items, count, count, grid,
+""" % ("\n          ".join(chip_btns), count, count, grid,
         _gen_date_fr(generated_at), count)
 
 
