@@ -25,7 +25,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - name: Generate catalog
         env:
           GITHUB_TOKEN: ${{ secrets.EBPRO_CI_PAT || secrets.GITHUB_TOKEN }}
@@ -34,7 +34,7 @@ jobs:
       # Purged Tailwind v3 CSS (no runtime CDN): scans catalog.py for class
       # literals per tailwind.config.js, emits public/app.css (~15 s npx).
       - name: Build purged CSS
-        run: npx tailwindcss@3 -c tailwind.config.js -i inputs.css -o public/app.css --minify
+        run: npx tailwindcss@3.4.19 -c tailwind.config.js -i inputs.css -o public/app.css --minify
       - name: Upload catalog site artifact
         uses: actions/upload-artifact@v4
         with:

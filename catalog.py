@@ -605,12 +605,17 @@ def _gen_date_fr(iso_utc):
     return dt.strftime("%d/%m/%Y à %H:%M UTC")
 
 
-def _status_chip(status):
-    """Sober status pastille for a card meta row ('' when no status-*)."""
+def _status_chip(status, muted=False):
+    """Sober status pastille for a card meta row ('' when no status-*).
+
+    ``muted`` (frozen/duplicate statuses) forces the neutral ``chip-muted``
+    pastille instead of the status colour mapping.
+    """
     if not status:
         return ""
+    cls = "chip-muted" if muted else STATUS_CHIP.get(status, "chip-neutral")
     return ('<span class="chip %s">%s</span>'
-            % (STATUS_CHIP.get(status, "chip-neutral"), html.escape(status)))
+            % (cls, html.escape(status)))
 
 
 # --- rendering ---------------------------------------------------------------
@@ -630,7 +635,13 @@ def _render_card(c):
     ``data-pushed`` (ISO) + the absolute short French date.
     """
     cat = c["category"]
-    muted = " opacity-60" if c["status"] in STATUS_MUTED else ""
+    # Muted statuses (frozen/duplicate) are de-emphasised LOCALLY: a neutral
+    # chip-muted status pastille + slate-600 name/date meta lines. No
+    # card-level transparency (the old 60% opacity washed the slate-500 text
+    # below AA contrast, review P1-a). Footer links keep their normal AA
+    # colours.
+    is_muted = c["status"] in STATUS_MUTED
+    meta_text = "text-slate-600" if is_muted else "text-slate-500"
     esc_name = html.escape(c["name"])
     esc_desc = html.escape(c["description"] or "")
     esc_topics = html.escape(" ".join(c["topics"]), quote=True)
@@ -640,12 +651,12 @@ def _render_card(c):
         (c["name"] + " " + (c["description"] or "")).lower(), quote=True)
     parts = [
         '<article data-area="%s" data-topics="%s" data-search="%s" '
-        'class="card rounded-lg border border-slate-200 p-4 shadow-sm%s">'
-        % (cat, esc_topics, esc_search, muted),
+        'class="card rounded-lg border border-slate-200 p-4 shadow-sm">'
+        % (cat, esc_topics, esc_search),
         '<div class="flex flex-wrap items-center gap-2">'
         '<span class="text-[13px] font-medium uppercase tracking-wide '
         'text-slate-600">%s</span>%s</div>'
-        % (CATEGORY_LABELS[cat].upper(), _status_chip(c["status"])),
+        % (CATEGORY_LABELS[cat].upper(), _status_chip(c["status"], is_muted)),
     ]
     # Primary line links to the site: ``stable/`` when the repo has a v* tag
     # (same condition as the Stable button), ``develop/`` otherwise.
@@ -659,9 +670,9 @@ def _render_card(c):
             'hover:underline">%s</a>' % (primary_url, esc_desc))
         parts.append(
             '<a href="%s" target="_blank" rel="noopener" '
-            'class="mt-1 block break-all font-mono text-[13px] '
-            'text-slate-500 hover:text-indigo-700">%s</a>'
-            % (c["github_url"], esc_name))
+            'class="mt-1 block break-all font-mono text-[13px] %s '
+            'hover:text-indigo-700">%s</a>'
+            % (c["github_url"], meta_text, esc_name))
     else:
         parts.append(
             '<a href="%s" target="_blank" rel="noopener" '
@@ -705,7 +716,7 @@ def _render_card(c):
     # works with JS blocked.)
     if c["branches"]:
         items = "".join(
-            '<li><a class="block whitespace-nowrap px-3 py-3 font-mono '
+            '<li><a class="block min-h-11 whitespace-nowrap px-3 py-3 font-mono '
             'text-[13px] text-slate-700 hover:bg-slate-100 '
             'hover:text-indigo-700" '
             'href="%s/%s/previews/%s/" target="_blank" rel="noopener">'
@@ -726,9 +737,10 @@ def _render_card(c):
     abs_date = _abs_date_fr(c["pushed_at"])
     if abs_date:
         parts.append(
-            '<div class="mt-3 text-[13px] text-slate-500" '
+            '<div class="mt-3 text-[13px] %s" '
             'data-pushed="%s">Mis à jour %s</div>'
-            % (html.escape(c["pushed_at"], quote=True), html.escape(abs_date)))
+            % (meta_text, html.escape(c["pushed_at"], quote=True),
+               html.escape(abs_date)))
     parts.append("</article>")
     return "\n      ".join(parts)
 
@@ -770,7 +782,7 @@ def _render_index(cards, generated_at):
         '<li><label class="flex min-h-11 items-center gap-2 px-3 py-2 '
         'font-mono text-[13px] text-slate-700 hover:bg-slate-100">'
         '<input type="checkbox" class="h-4 w-4 shrink-0 accent-indigo-700" '
-        'data-topic="%s">%s<span class="ml-auto pl-3 text-slate-400">'
+        'data-topic="%s">%s<span class="ml-auto pl-3 text-slate-600">'
         '%d</span></label></li>'
         % (html.escape(t), html.escape(t), freq[t])
         for t in all_topics)
@@ -805,7 +817,7 @@ def _render_index(cards, generated_at):
     <nav aria-label="Filtres" id="filters" class="pb-2">
       <button id="f-toggle" type="button" class="f-btn lg:hidden"
               aria-expanded="false" aria-controls="filters-body">Filtres</button>
-      <div id="filters-body" class="hidden mt-3 flex-col gap-3 rounded-lg border border-slate-200 bg-white p-3 lg:flex lg:flex-row lg:flex-wrap lg:items-center">
+      <div id="filters-body" class="hidden mt-3 flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-3 lg:flex lg:flex-row lg:flex-wrap lg:items-center">
         <div role="group" aria-label="Catégorie" class="flex flex-wrap gap-2">
           %s
         </div>

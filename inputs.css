@@ -74,7 +74,7 @@
   /* Sober status chips: dark text on light tinted ground (AA). */
   .chip {
     @apply inline-flex items-center rounded-full border px-2 py-0.5
-      text-xs font-medium;
+      text-[13px] font-medium;
   }
   .chip-active {
     @apply border-emerald-200 bg-emerald-50 text-emerald-800;
@@ -86,6 +86,12 @@
     @apply border-sky-200 bg-sky-50 text-sky-800;
   }
   .chip-neutral {
+    @apply border-slate-300 bg-slate-100 text-slate-600;
+  }
+  /* Muted-status pastille (frozen/duplicate): the local de-emphasis that
+     replaces the old card-level opacity-60 (which failed AA on the card
+     text). slate-600 on slate-100 stays AA. */
+  .chip-muted {
     @apply border-slate-300 bg-slate-100 text-slate-600;
   }
   .chip-topic {
