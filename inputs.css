@@ -1,0 +1,137 @@
+/*
+ * Tailwind v3 input sheet for the teaching catalog.
+ *
+ * Everything component-like the page uses (cards, chips, buttons, dropdown
+ * disclosures, skip link) is hand-rolled here in @layer components on top of
+ * the default Tailwind palette — daisyUI was dropped in v5: its
+ * pre-built full.min.css cannot be purged (≈300 KB of every theme), its
+ * .card{display:flex} broke utility-based visibility toggling, and its CDN
+ * delivery was the blocklist/FOUC risk this change removes.
+ *
+ * Purged by: npx tailwindcss@3 -c tailwind.config.js -i inputs.css
+ *               -o public/app.css --minify   (content = catalog.py)
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Visible keyboard focus everywhere (AA non-text contrast). */
+  :focus-visible {
+    outline: 2px solid #4338ca; /* indigo-700 */
+    outline-offset: 2px;
+  }
+
+  /* Native <details> summaries act as our disclosure buttons: suppress the
+     UA marker (the CSS caret below replaces it). */
+  summary {
+    cursor: pointer;
+    list-style: none;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+}
+
+@layer components {
+  /* Card surface. `relative` anchors the Branches disclosure; the z bump on
+     an open disclosure keeps the list above the following cards (grid items
+     are all positioned, so DOM order alone would clip it). */
+  .card {
+    @apply relative bg-white;
+  }
+  .card:has(.dd[open]) {
+    @apply z-10;
+  }
+
+  /* Footer / header action links: min-height 44px tap target, sober outline
+     by default; .lnk-primary is the single-accent solid variant (Stable). */
+  .lnk {
+    @apply inline-flex min-h-11 items-center justify-center rounded-md
+      border border-slate-300 bg-white px-3 text-sm font-medium
+      text-slate-700 transition-colors
+      hover:border-indigo-700 hover:text-indigo-700;
+  }
+  .lnk-primary {
+    @apply border-indigo-700 bg-indigo-700 text-white
+      hover:border-indigo-800 hover:bg-indigo-800 hover:text-white;
+  }
+
+  /* Category segmented control (aria-pressed marks the active one — the JS
+     reads state from the attribute, never from class sniffing). */
+  .f-btn {
+    @apply inline-flex min-h-11 items-center justify-center rounded-md
+      border border-slate-300 bg-white px-3 text-sm font-medium
+      text-slate-700 transition-colors
+      hover:border-indigo-700 hover:text-indigo-700;
+  }
+  .f-btn[aria-pressed="true"] {
+    @apply border-indigo-700 bg-indigo-700 text-white
+      hover:border-indigo-800 hover:bg-indigo-800 hover:text-white;
+  }
+
+  /* Sober status chips: dark text on light tinted ground (AA). */
+  .chip {
+    @apply inline-flex items-center rounded-full border px-2 py-0.5
+      text-xs font-medium;
+  }
+  .chip-active {
+    @apply border-emerald-200 bg-emerald-50 text-emerald-800;
+  }
+  .chip-partial {
+    @apply border-amber-200 bg-amber-50 text-amber-800;
+  }
+  .chip-stub {
+    @apply border-sky-200 bg-sky-50 text-sky-800;
+  }
+  .chip-neutral {
+    @apply border-slate-300 bg-slate-100 text-slate-600;
+  }
+  .chip-topic {
+    @apply border-slate-200 bg-slate-50 font-mono text-slate-600;
+  }
+
+  /* <details>-based dropdown (card Branches, filter Thèmes): native
+     disclosure, works with JS blocked. Width is content-driven (fluid,
+     no fixed w-56/w-64). */
+  .dd {
+    @apply relative inline-block;
+  }
+  .dd-list {
+    @apply absolute left-0 top-full z-30 mt-1 min-w-full rounded-md
+      border border-slate-200 bg-white shadow-lg;
+  }
+
+  /* Caret on disclosure summaries (CSS-drawn, no icon font/emoji). */
+  .chev::after {
+    content: "";
+    @apply ml-2 inline-block h-2 w-2 border-b-2 border-r-2 border-slate-500;
+    transform: rotate(45deg);
+  }
+  details[open] > .chev::after {
+    transform: rotate(-135deg);
+  }
+
+  /* Skip link: off-canvas until focused. */
+  .skip-link {
+    @apply absolute left-3 top-3 z-50 rounded-md bg-indigo-700 px-3 py-2
+      text-sm font-medium text-white;
+    transform: translateY(-250%);
+  }
+  .skip-link:focus {
+    transform: translateY(0);
+  }
+}
+
+/* Respect reduced-motion preferences (carets, hover transitions). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -8,26 +8,34 @@ self-contained static card grid of the teaching surface under ``./public/``:
     ``lecture-`` -> Lecture, ``notebook-`` -> Notebook, ``sample-`` ->
     Samples (+ FORCED_SAMPLES names); archived repos, repos carrying the
     ``status-legacy`` topic and non-matching names are excluded entirely,
-  * card content: the human description as the primary line (2-line clamp)
-    and the repo name as a small monospace secondary line, verbatim GitHub
-    topic badges (area-* omitted; the card colour is the category signal),
-    and a daisyUI button footer: ``Stable`` (solid, only when the repo
-    has a ``v*`` tag) BEFORE ``Latest`` (solid), ``Source`` (public repos
-    only) and a ``⎇ Branches ▾`` hover dropdown, plus the last-update date
-    (absolute short French date at build time, rewritten to "il y a X"
-    by JS when available). Topics render as soft rounded pastilles
-    (badge-soft, deterministic hue). Filters: sticky bar with live
-    search + category join-group (solid btn-primary when selected) +
+  * card content (v5 sober mobile-first layout): a meta row with the
+    category label + status chip (colour-coded, dark text on light tint),
+    the human description as the primary line (2-line clamp) and the repo
+    name as a small monospace secondary line, verbatim GitHub topic
+    pastilles (neutral chips, area-* omitted), a 44px-tap-target links
+    footer: ``Stable`` (solid accent, only when the repo has a ``v*``
+    tag) BEFORE ``Latest``, ``Source`` (public repos only) and a
+    ``Branches`` <details> disclosure (native, works without JS), plus the
+    last-update date (absolute short French date at build time, rewritten
+    to "il y a X" by JS when available). Filters: sticky slim header with
+    live search; filter panel collapsed behind a "Filtres" toggle below
+    lg, inline from lg up; category segmented control (aria-pressed) +
     topic checkbox dropdown (AND semantics) + result count; vanilla JS,
-    visibility via inline style.display (no utility-class fragility).
+    visibility via the Tailwind ``hidden`` utility (safe now that the
+    daisyUI .card{display:flex} override is gone).
 
 Branch/tag data is fetched per displayed repo (2 REST calls each,
 ThreadPool(8)); a per-repo fetch failure degrades silently to hiding the
 matching button. Site URLs are NOT probed at build time; a stale link is
 acceptable (see the stable-pointer note in _render_card).
 
-Tailwind CSS is delivered via the Play CDN and daisyUI 4 via a pinned
-cssdelivr stylesheet (see the note in the template); fonts are the system stack, no images or icons.
+Styling is a purged Tailwind v3 stylesheet built AT CI BUILD TIME from
+``inputs.css`` + ``tailwind.config.js`` (content = this file) into
+``public/app.css`` and linked locally — no CDN <script>/<link> in the
+page, so it renders correctly with third-party/CDN requests blocked and
+without FOUC. Fonts are the system stack, no images or icons. Running
+``python catalog.py`` locally regenerates index.html; the CSS step is
+``npx tailwindcss@3 -c tailwind.config.js -i inputs.css -o public/app.css --minify``.
 
 Pure Python 3 stdlib. Auth: reads ``GITHUB_TOKEN`` (required) from the
 environment. The ``cleanup`` subcommand (Cloudflare Pages preview pruning,
@@ -80,19 +88,23 @@ CATEGORY_LABELS = {
     "sample": "Samples",
 }
 
-# Pastel card backgrounds + borders (Tailwind classes). The card colour IS
-# the category signal (spec v3: no category chip on the cards).
-CATEGORY_CARD = {
-    "lecture": "bg-sky-100 border-sky-300",
-    "notebook": "bg-orange-100 border-orange-300",
-    "sample": "bg-emerald-100 border-emerald-300",
+# Status chips (v5): sober colour-coded pastilles, dark text on a light
+# tint (AA). Unknown/other statuses (frozen, duplicate, legacy…) fall back
+# to chip-neutral; the card itself is a neutral white surface — the
+# category is labelled in the meta row, not by card colour (single-accent
+# brief: colour is reserved for actions/status).
+STATUS_CHIP = {
+    "active": "chip-active",
+    "partial": "chip-partial",
+    "stub": "chip-stub",
 }
 
 # Statuses rendered with reduced emphasis.
 STATUS_MUTED = ("frozen", "duplicate")
 
 # Topic prefixes omitted from card badges and from the topic filter:
-# area-* is redundant with the colour-coded category (spec v3 item 5).
+# area-* is redundant with the category label in the card meta row
+# (spec v3 item 5).
 BADGE_EXCLUDED_PREFIXES = ("area-",)
 
 
@@ -593,32 +605,29 @@ def _gen_date_fr(iso_utc):
     return dt.strftime("%d/%m/%Y à %H:%M UTC")
 
 
-# Pastille tones (daisyUI 4.12 badge-soft-* variants), assigned
-# deterministically from the topic name so a topic keeps its hue across
-# builds (sum of bytes mod palette size — no RNG, no persistence).
-TOPIC_TONES = ("badge-soft-info", "badge-soft-success", "badge-soft-warning",
-               "badge-soft-error", "badge-soft")
-
-
-def _tone_for(topic):
-    """One of TOPIC_TONES for a topic name (deterministic hue rotation)."""
-    return TOPIC_TONES[sum(topic.encode("utf-8")) % len(TOPIC_TONES)]
+def _status_chip(status):
+    """Sober status pastille for a card meta row ('' when no status-*)."""
+    if not status:
+        return ""
+    return ('<span class="chip %s">%s</span>'
+            % (STATUS_CHIP.get(status, "chip-neutral"), html.escape(status)))
 
 
 # --- rendering ---------------------------------------------------------------
 
 
 def _render_card(c):
-    """Return the <article> for one catalog entry ``c`` (spec v4 layout).
+    """Return the <article> for one catalog entry ``c`` (v5 sober layout).
 
-    Hierarchy: the human description is the primary line (line-clamp-2);
-    the repo name is a small monospace secondary line (fallback: with no
-    description, the name becomes the primary line). Topics are rendered as
-    soft rounded pastilles (badge badge-soft rounded-full, deterministic
-    hue), area-* omitted (the card colour is the category signal). Footer
-    button order: ``Stable`` (solid success, only with a v* tag) BEFORE
-    ``Latest`` (solid info), ``Source`` (public only), ``⎇ Branches ▾``.
-    The date line carries ``data-pushed`` (ISO) + the absolute short date.
+    Hierarchy: a meta row (category label + status chip), then the human
+    description as the primary line (line-clamp-2, links to the primary
+    site path); the repo name as a small monospace secondary line linking
+    GitHub (fallback: with no description, the name becomes the primary
+    line). Topics are neutral monospace pastilles (area-* omitted, the
+    category is labelled in the meta row). Footer links (Stable BEFORE
+    Latest per spec v4, Source for public repos, Branches <details>
+    disclosure) are >=44px tap targets. The date line carries
+    ``data-pushed`` (ISO) + the absolute short French date.
     """
     cat = c["category"]
     muted = " opacity-60" if c["status"] in STATUS_MUTED else ""
@@ -631,9 +640,12 @@ def _render_card(c):
         (c["name"] + " " + (c["description"] or "")).lower(), quote=True)
     parts = [
         '<article data-area="%s" data-topics="%s" data-search="%s" '
-        'class="card card-hover %s card-border rounded-xl%s">'
-        % (cat, esc_topics, esc_search, CATEGORY_CARD[cat], muted),
-        '<div class="card-body p-4 gap-0">',
+        'class="card rounded-lg border border-slate-200 p-4 shadow-sm%s">'
+        % (cat, esc_topics, esc_search, muted),
+        '<div class="flex flex-wrap items-center gap-2">'
+        '<span class="text-[13px] font-medium uppercase tracking-wide '
+        'text-slate-600">%s</span>%s</div>'
+        % (CATEGORY_LABELS[cat].upper(), _status_chip(c["status"])),
     ]
     # Primary line links to the site: ``stable/`` when the repo has a v* tag
     # (same condition as the Stable button), ``develop/`` otherwise.
@@ -642,98 +654,112 @@ def _render_card(c):
     if esc_desc:
         parts.append(
             '<a href="%s" target="_blank" rel="noopener" '
-            'class="text-base leading-snug line-clamp-2 break-words '
+            'class="mt-1 block text-base font-medium leading-snug '
+            'text-slate-900 line-clamp-2 hover:text-indigo-700 '
             'hover:underline">%s</a>' % (primary_url, esc_desc))
         parts.append(
             '<a href="%s" target="_blank" rel="noopener" '
-            'class="mt-1 font-mono text-sm opacity-70 hover:opacity-100 '
-            'break-all">%s</a>' % (c["github_url"], esc_name))
+            'class="mt-1 block break-all font-mono text-[13px] '
+            'text-slate-500 hover:text-indigo-700">%s</a>'
+            % (c["github_url"], esc_name))
     else:
         parts.append(
             '<a href="%s" target="_blank" rel="noopener" '
-            'class="text-base font-semibold hover:underline break-all">'
+            'class="mt-1 block break-all text-base font-semibold '
+            'text-slate-900 hover:text-indigo-700 hover:underline">'
             '%s</a>' % (primary_url, esc_name))
     # Topic pastilles: actual GitHub topics verbatim (no synthetic labels),
-    # minus area-*, as soft rounded badges with a deterministic hue.
+    # minus area-*, as neutral monospace chips (single-accent palette).
     pills = [t for t in c["topics"]
              if not t.startswith(BADGE_EXCLUDED_PREFIXES)]
     if pills:
         parts.append(
             '<div class="mt-3 flex flex-wrap gap-1">%s</div>'
-            % "".join('<span class="badge %s badge-sm rounded-full '
-                      'font-mono">%s</span>'
-                      % (_tone_for(t), html.escape(t)) for t in pills))
+            % "".join('<span class="chip chip-topic">%s</span>'
+                      % html.escape(t) for t in pills))
 
-    # Footer buttons. Stable FIRST (spec v4), solid btn-success, only when
-    # the repo has a v* tag; points at the canonical ``stable/`` pointer
-    # path written by the deploy-static job (v1.3.23+) on v* tag deploys.
+    # Footer links. Stable FIRST (spec v4), solid accent, only when the
+    # repo has a v* tag; points at the canonical ``stable/`` pointer path
+    # written by the deploy-static job (v1.3.23+) on v* tag deploys.
     links = []
     if c["latest_vtag"]:
         links.append(
-            '<a class="btn btn-xs btn-success shadow-sm" '
-            'title="Dernière version : %s" href="%s/%s/stable/" '
-            'target="_blank" rel="noopener">★ Stable</a>'
+            '<a class="lnk lnk-primary" title="Dernière version : %s" '
+            'href="%s/%s/stable/" target="_blank" rel="noopener">'
+            'Stable</a>'
             % (html.escape(c["latest_vtag"]), SITE_BASE, c["name"]))
     # Latest = the develop render (every card: all three categories are
-    # Quarto render-callers). Solid btn-info so it reads as a real button.
+    # Quarto render-callers).
     links.append(
-        '<a class="btn btn-xs btn-info shadow-sm" href="%s/%s/develop/" '
-        'target="_blank" rel="noopener">Latest</a>'
-        % (SITE_BASE, c["name"]))
+        '<a class="lnk" href="%s/%s/develop/" target="_blank" '
+        'rel="noopener">Latest</a>' % (SITE_BASE, c["name"]))
     # Source only for public repos (user requirement, spec v3 item 6).
     if not c["private"]:
         links.append(
-            '<a class="btn btn-xs btn-outline shadow-sm" href="%s" '
-            'target="_blank" rel="noopener">↗ Source</a>' % c["github_url"])
-    # ⎇ Branches: daisyUI hover dropdown of the non-default branches, each
-    # linking the previews/<sanitized>/ path (branch "/" -> "-"). Hidden
-    # when the fetch failed or the repo has no non-default branch.
+            '<a class="lnk" href="%s" target="_blank" '
+            'rel="noopener">Source</a>' % c["github_url"])
+    # Branches: native <details> disclosure of the non-default branches,
+    # each linking the previews/<sanitized>/ path (branch "/" -> "-").
+    # Hidden when the fetch failed or the repo has no non-default branch.
+    # (Replaces the v4 hover dropdown: keyboard- and touch-accessible,
+    # works with JS blocked.)
     if c["branches"]:
         items = "".join(
-            '<li><a class="text-xs whitespace-nowrap" '
+            '<li><a class="block whitespace-nowrap px-3 py-3 font-mono '
+            'text-[13px] text-slate-700 hover:bg-slate-100 '
+            'hover:text-indigo-700" '
             'href="%s/%s/previews/%s/" target="_blank" rel="noopener">'
-            '⎇ %s</a></li>'
+            '%s</a></li>'
             % (SITE_BASE, c["name"], html.escape(b.replace("/", "-")),
                html.escape(b))
             for b in c["branches"])
         links.append(
-            '<div class="dropdown dropdown-end dropdown-hover">'
-            '<div tabindex="0" role="button" class="btn btn-xs">'
-            '⎇ Branches ▾</div>'
-            '<ul tabindex="0" class="dropdown-content z-30 menu p-2 '
-            'shadow-lg bg-base-100 border border-base-300 rounded-box '
-            'w-56 max-h-64 overflow-y-auto">%s</ul></div>' % items)
+            '<details class="dd"><summary class="lnk chev" '
+            'aria-expanded="false">Branches</summary>'
+            '<ul class="dd-list max-h-64 overflow-y-auto py-1">%s</ul>'
+            '</details>' % items)
     parts.append(
-        '<footer class="card-actions mt-4 justify-start">%s</footer>'
+        '<footer class="mt-4 flex flex-wrap items-center gap-2">%s</footer>'
         % "".join(links))
     # Date: absolute short French date visible (accurate at any read time);
     # data-pushed ISO lets the JS rewrite it to "il y a X" when available.
     abs_date = _abs_date_fr(c["pushed_at"])
     if abs_date:
         parts.append(
-            '<div class="mt-2 text-[11px] opacity-60" data-pushed="%s">'
-            'Mis à jour %s</div>'
+            '<div class="mt-3 text-[13px] text-slate-500" '
+            'data-pushed="%s">Mis à jour %s</div>'
             % (html.escape(c["pushed_at"], quote=True), html.escape(abs_date)))
-    parts.append("</div></article>")
+    parts.append("</article>")
     return "\n      ".join(parts)
 
 
 def _render_index(cards, generated_at):
-    """Return the full index.html source (Tailwind Play CDN + daisyUI 4)."""
+    """Return the full index.html source (v5: purged local app.css, no CDN).
+
+    The stylesheet is generated at CI build time from inputs.css +
+    tailwind.config.js into public/app.css and linked relatively (the page
+    is deployed flat under catalog/, so "app.css" resolves next to
+    index.html). Layout is mobile-first: sticky 56px header carrying the
+    live search, filter panel collapsed behind a "Filtres" toggle below lg
+    and inline from lg up, 1/2/3-column card grid.
+    """
     count = len(cards)
-    # Category segmented control: daisyUI join; the selected chip is solid
-    # btn-primary (Tous by default).
+    # Category segmented control: real buttons, the selected one marked
+    # aria-pressed (solid accent); "Tous" active by default. State lives in
+    # the attribute, never in a style class (no class-sniffing fragility).
     tally = {a: sum(1 for c in cards if c["category"] == a)
              for a in CATEGORIES}
     chip_btns = [
-        '<button data-cat="all" class="btn btn-sm btn-primary">'
-        'Tous (%d)</button>' % count]
+        '<button type="button" data-cat="all" aria-pressed="true" '
+        'class="f-btn">Tous (%d)</button>' % count]
     for a in CATEGORIES:
         chip_btns.append(
-            '<button data-cat="%s" class="btn btn-sm btn-ghost">'
-            '%s (%d)</button>' % (a, CATEGORY_LABELS[a], tally[a]))
-    # Topic filter: ALL non-area-* topics as real checkboxes in a daisy
-    # dropdown, sorted by frequency (most used first), with per-topic counts.
+            '<button type="button" data-cat="%s" aria-pressed="false" '
+            'class="f-btn">%s (%d)</button>'
+            % (a, CATEGORY_LABELS[a], tally[a]))
+    # Topic filter: ALL non-area-* topics as real checkboxes in a native
+    # <details> disclosure, sorted by frequency (most used first), with
+    # per-topic counts.
     freq = {}
     for c in cards:
         for t in c["topics"]:
@@ -741,78 +767,87 @@ def _render_index(cards, generated_at):
                 freq[t] = freq.get(t, 0) + 1
     all_topics = sorted(freq, key=lambda t: (-freq[t], t))
     topic_items = "".join(
-        '<li><label class="dropdown-item text-xs font-mono gap-2">'
-        '<input type="checkbox" class="checkbox checkbox-xs" '
-        'data-topic="%s">%s <span class="ml-auto opacity-50">%d</span>'
-        '</label></li>' % (html.escape(t), html.escape(t), freq[t])
+        '<li><label class="flex min-h-11 items-center gap-2 px-3 py-2 '
+        'font-mono text-[13px] text-slate-700 hover:bg-slate-100">'
+        '<input type="checkbox" class="h-4 w-4 shrink-0 accent-indigo-700" '
+        'data-topic="%s">%s<span class="ml-auto pl-3 text-slate-400">'
+        '%d</span></label></li>'
+        % (html.escape(t), html.escape(t), freq[t])
         for t in all_topics)
     grid = "\n      ".join(_render_card(c) for c in cards)
     return """<!DOCTYPE html>
-<html lang="fr" data-theme="corporate">
+<html lang="fr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
   <title>Supports pédagogiques · Emmanuel BRUNO</title>
-  <!-- Tailwind Play CDN + daisyUI 4.12.24 dist/full.min.css (the official
-       CDN pairing; the package has NO root daisyui.css — that 404 was the
-       v3 bug). Zero-build static page, regenerated by the catalog workflow. -->
-  <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.24/dist/full.min.css" rel="stylesheet" type="text/css">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tailwind v3 purgé, généré au build CI (inputs.css -> public/app.css).
+       Aucun CDN : la page est mise en page intégralement même si les
+       requêtes tierces sont bloquées et sans FOUC. -->
+  <link rel="stylesheet" href="app.css">
 </head>
-<body class="min-h-screen bg-base-100 text-base-content antialiased">
-  <header class="max-w-7xl mx-auto px-4 pt-10 pb-4 flex flex-wrap items-start justify-between gap-4">
-    <div class="max-w-3xl">
-      <h1 class="text-3xl font-bold tracking-tight">Supports pédagogiques d’Emmanuel BRUNO</h1>
-      <p class="mt-2 text-base opacity-70">Des cours complets (lecture), des modules indépendants (notebook) et des exemples (samples).</p>
+<body class="min-h-screen bg-slate-50 text-slate-900 antialiased">
+  <a class="skip-link" href="#grid">Aller au catalogue</a>
+  <header class="sticky top-0 z-40 h-14 border-b border-slate-200 bg-white">
+    <div class="mx-auto flex h-full max-w-6xl items-center gap-3 px-4">
+      <h1 class="min-w-0 truncate text-lg font-semibold tracking-tight">Supports pédagogiques <span class="hidden sm:inline">d’Emmanuel BRUNO</span></h1>
+      <input id="f-search" type="search" placeholder="Rechercher un support…"
+             class="ml-auto h-11 w-full max-w-[10rem] rounded-md border border-slate-300 bg-white px-3 text-sm sm:max-w-xs"
+             aria-label="Rechercher un support">
     </div>
-    <a class="btn btn-outline btn-sm mt-1 whitespace-nowrap" href="mailto:emmanuel.bruno@univ-tln.fr">✉ emmanuel.bruno@univ-tln.fr</a>
   </header>
-  <nav aria-label="Filtres" id="filters" class="sticky top-0 z-40 max-w-7xl mx-auto px-4 py-2">
-    <div class="card card-compact bg-base-100 border border-base-300 shadow-sm">
-      <div class="card-body flex-row flex-wrap items-center gap-3 p-3">
-        <input id="f-search" type="search" placeholder="Rechercher un support…"
-               class="input input-sm input-bordered w-56" aria-label="Rechercher">
-        <div class="join" role="group" aria-label="Catégorie">
+  <main class="mx-auto max-w-6xl px-4">
+    <section class="py-6">
+      <p class="max-w-3xl text-base text-slate-600">Des cours complets (lecture), des modules indépendants (notebook) et des exemples (samples).</p>
+      <a class="lnk mt-3" href="mailto:emmanuel.bruno@univ-tln.fr">emmanuel.bruno@univ-tln.fr</a>
+    </section>
+    <nav aria-label="Filtres" id="filters" class="pb-2">
+      <button id="f-toggle" type="button" class="f-btn lg:hidden"
+              aria-expanded="false" aria-controls="filters-body">Filtres</button>
+      <div id="filters-body" class="hidden mt-3 flex-col gap-3 rounded-lg border border-slate-200 bg-white p-3 lg:flex lg:flex-row lg:flex-wrap lg:items-center">
+        <div role="group" aria-label="Catégorie" class="flex flex-wrap gap-2">
           %s
         </div>
-        <div class="ml-auto flex items-center gap-2">
-          <span id="result-count" class="badge badge-soft badge-sm font-mono">%d/%d</span>
-          <div class="dropdown dropdown-end">
-            <label tabindex="0" class="btn btn-sm btn-ghost">Thèmes (<span id="topic-sel-count">0</span>) ▾</label>
-            <ul tabindex="0" class="dropdown-content menu p-2 shadow-lg bg-base-100 border border-base-300 rounded-box w-64 max-h-64 overflow-y-auto z-40">
-              %s
-            </ul>
-          </div>
-          <button id="f-reset" class="btn btn-sm btn-ghost">Réinitialiser</button>
+        <details class="dd">
+          <summary class="f-btn chev" aria-expanded="false">Thèmes (<span id="topic-sel-count">0</span>)</summary>
+          <ul class="dd-list max-h-80 overflow-y-auto py-1">
+            %s
+          </ul>
+        </details>
+        <div class="flex flex-wrap items-center gap-3 lg:ml-auto">
+          <button id="f-reset" type="button" class="f-btn">Réinitialiser</button>
+          <span id="result-count" class="chip chip-neutral font-mono">%d/%d</span>
         </div>
       </div>
-    </div>
-  </nav>
-  <main class="max-w-7xl mx-auto px-4 py-6">
+    </nav>
     <div id="grid"
-         class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+         class="grid grid-cols-1 gap-4 py-6 sm:grid-cols-2 lg:grid-cols-3">
       %s
     </div>
+    <p id="empty" class="hidden py-10 text-center text-slate-500">Aucun support ne correspond à ces filtres.</p>
   </main>
-  <footer class="max-w-7xl mx-auto px-4 pb-10 text-xs opacity-60 flex flex-wrap items-center gap-x-4 gap-y-1">
+  <footer class="mx-auto flex max-w-6xl flex-wrap items-center gap-x-4 gap-y-1 px-4 pb-10 text-[13px] text-slate-500">
     <span>Généré le %s</span>
     <span>%d dépôts</span>
-    <span>source : <a class="link" href="https://github.com/ebpro/teaching-catalog">teaching-catalog</a></span>
-    <span>Contact : <a class="link" href="mailto:emmanuel.bruno@univ-tln.fr">emmanuel.bruno@univ-tln.fr</a></span>
+    <span>source : <a class="text-indigo-700 hover:underline" href="https://github.com/ebpro/teaching-catalog">teaching-catalog</a></span>
+    <span>Contact : <a class="text-indigo-700 hover:underline" href="mailto:emmanuel.bruno@univ-tln.fr">emmanuel.bruno@univ-tln.fr</a></span>
   </footer>
   <script>
-    // Filtres v4 : recherche + catégorie (groupe exclusif) + thèmes (AND).
-    // La visibilité est pilotée par style.display (inline) et non par une
-    // classe utilitaire : un style inline résiste à toute feuille de style,
-    // y compris .card{display:flex} de daisyUI (cause de la v3 "hidden" qui
-    // ne masquait rien selon l'ordre d'injection des CSS).
+    // Filtres v5 : recherche + catégorie (groupe exclusif, état porté par
+    // aria-pressed) + thèmes (AND) — composition identique à la v4.
+    // La visibilité des cartes est pilotée par la classe utilitaire
+    // "hidden" (display:none), sans feuille de style tierce : daisyUI est
+    // retiré, plus de .card{display:flex} qui écrasait "hidden" en v3/v4.
     const cards = [...document.querySelectorAll('#grid article')];
     const catBtns = [...document.querySelectorAll('#filters [data-cat]')];
     const topicBoxes = [...document.querySelectorAll('#filters [data-topic]')];
     const search = document.getElementById('f-search');
     const countEl = document.getElementById('result-count');
     const selCountEl = document.getElementById('topic-sel-count');
+    const emptyEl = document.getElementById('empty');
     const total = cards.length;
+    let cat = "all";
 
     // Dates : la page est livrée avec la date absolue (juste sans JS) ;
     // si JS est disponible on la remplace par "il y a X" (jamais périmé).
@@ -829,11 +864,16 @@ def _render_index(cards, generated_at):
       el.textContent = "Mis à jour " + relFr(el.dataset.pushed);
     });
 
+    // <details>/<summary> : aria-expanded synchronisé sur l'état natif.
+    document.querySelectorAll('details').forEach(d => {
+      const s = d.querySelector('summary[aria-expanded]');
+      if (s) d.addEventListener("toggle", () =>
+        s.setAttribute("aria-expanded", String(d.open)));
+    });
+
     // Recalcule tout l'état visible depuis les data-attributs du DOM.
     function applyFilters() {
       const q = (search.value || "").trim().toLowerCase();
-      const active = catBtns.find(b => b.classList.contains('btn-primary'));
-      const cat = active ? active.dataset.cat : 'all';
       const sel = topicBoxes.filter(b => b.checked).map(b => b.dataset.topic);
       let visible = 0;
       cards.forEach(c => {
@@ -841,17 +881,17 @@ def _render_index(cards, generated_at):
         const ok = (cat === "all" || c.dataset.area === cat)
           && (!q || (c.dataset.search || "").includes(q))
           && sel.every(t => topics.includes(t));
-        c.style.display = ok ? "" : "none";
+        c.classList.toggle("hidden", !ok);
         if (ok) visible++;
       });
       countEl.textContent = visible + "/" + total;
       selCountEl.textContent = String(sel.length);
+      emptyEl.classList.toggle("hidden", visible !== 0);
     }
     catBtns.forEach(b => b.addEventListener("click", () => {
-      catBtns.forEach(x => {
-        x.classList.toggle("btn-primary", x === b);
-        x.classList.toggle("btn-ghost", x !== b);
-      });
+      cat = b.dataset.cat;
+      catBtns.forEach(x =>
+        x.setAttribute("aria-pressed", String(x === b)));
       applyFilters();
     }));
     search.addEventListener("input", applyFilters);
@@ -859,17 +899,24 @@ def _render_index(cards, generated_at):
     document.getElementById("f-reset").addEventListener("click", () => {
       search.value = "";
       topicBoxes.forEach(b => { b.checked = false; });
-      catBtns.forEach(x => {
-        x.classList.toggle("btn-primary", x.dataset.cat === "all");
-        x.classList.toggle("btn-ghost", x.dataset.cat !== "all");
-      });
+      cat = "all";
+      catBtns.forEach(x =>
+        x.setAttribute("aria-pressed", String(x.dataset.cat === "all")));
       applyFilters();
+    });
+    // Panneau de filtres : masqué sous lg derrière le bouton "Filtres"
+    // (aria-expanded), inline dès lg (classes lg:* — visible même sans JS).
+    const fToggle = document.getElementById("f-toggle");
+    const fBody = document.getElementById("filters-body");
+    fToggle.addEventListener("click", () => {
+      const open = fBody.classList.toggle("hidden") === false;
+      fToggle.setAttribute("aria-expanded", String(open));
     });
   </script>
 </body>
 </html>
-""" % ("\n          ".join(chip_btns), count, count, topic_items, grid,
-       _gen_date_fr(generated_at), count)
+""" % ("\n          ".join(chip_btns), topic_items, count, count, grid,
+        _gen_date_fr(generated_at), count)
 
 
 
@@ -953,7 +1000,8 @@ def main():
     print("Total: %d catalog cards from %d org repos in %.1fs | "
           "API calls: %d" % (len(cards), len(all_repos),
                              time.time() - start_ts, _call_count))
-    sys.stderr.write("Wrote %s/ (Tailwind card grid, %d repos)\n"
+    sys.stderr.write("Wrote %s/ (static card grid, %d repos; build the "
+                     "purged CSS with the tailwindcss CLI step)\n"
                      % (OUT_DIR, len(cards)))
     return 0
 
