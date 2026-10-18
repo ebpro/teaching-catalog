@@ -147,6 +147,15 @@
     @apply cursor-pointer border-slate-300 bg-white font-mono text-slate-700
       hover:border-indigo-700 hover:text-indigo-700;
   }
+  /* Grouping headers (spec v7 item 4): sober band above the first visible
+     card of each group, inserted by the JS (which also adds the
+     col-span-full utility so the band spans the grid). slate-900 on
+     slate-50 with a slate-200 border — AA+, no accent competition with
+     the category chips. */
+  .group-h {
+    @apply mt-2 rounded-md border border-slate-200 bg-slate-50 px-3
+      py-2 text-sm font-semibold uppercase tracking-wide text-slate-900;
+  }
 
   /* <details>-based dropdown (card Branches, filter Thèmes): native
      disclosure, works with JS blocked. Width is content-driven (fluid,

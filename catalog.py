@@ -17,9 +17,10 @@ self-contained static card grid of the teaching surface under ``./public/``:
     linking GitHub (that name link is the single "source" affordance —
     the v6 Source footer slot was removed in v6.2). Topic pastilles are
     the repo's REAL GitHub topics minus the system ones
-    (``SYSTEM_TOPIC_PREFIXES`` area-/status- and ``SYSTEM_TOPICS``
-    fmt-ipynb/review/github-actions/self-hosted — labelling noise, not
-    teaching subjects), sorted alphabetically and rendered as filter
+    (``SYSTEM_TOPIC_PREFIXES`` area-/status-/formation-/filiere- and
+    ``SYSTEM_TOPICS`` fmt-ipynb/review/github-actions/self-hosted —
+    labelling noise, not teaching subjects), sorted alphabetically and
+    rendered as filter
     TOGGLE buttons. The uniform action row ALWAYS shows the 3 slots
     ``Stable · Latest · Branches`` in that order: a missing target
     renders as a disabled placeholder (unfocusable
@@ -42,18 +43,30 @@ self-contained static card grid of the teaching surface under ``./public/``:
     segmented control (aria-pressed), a "Thèmes…" select (options sorted
     into Fréquents/Tous les thèmes <optgroup>s, >=5 cards = frequent) as
     a keyboard-accessible way to reach any topic without hunting cards,
-    sort select (JS reorders the <article> nodes) and result count.
+    "Formation" / "Filière" selects (spec v7: options derived from the
+    formation-/filiere- topics with human labels; the filière list is
+    narrowed by the JS to the selected formation), a "Grouper" select
+    (spec v7: JS inserts ``.group-h`` headers above the first visible
+    card of each formation / formation+filière group), sort select (JS
+    reorders the <article> nodes) and result count.
     The default order (build order and the "Défaut" sort option) is
     deterministic: category rank (``CATEGORY_RANK``, lecture -> … ->
-    student) then repo full name A->Z. Pills and the select toggle into
-    the SAME active-topic Set (AND intersection semantics, one source of
-    truth); an "Filtres actifs" chip row (a removable × chip per active
-    topic/category/search + "Tout effacer") appears when anything is
-    active. Sort, pill-toggling and the Thèmes select are progressive
+    student) then, for lecture cards, formation -> filière -> name and
+    for every other card the full name A->Z (baked as ``data-sortkey``).
+    Pills and the Thèmes select toggle into the SAME active-topic Set
+    (AND intersection semantics, one source of truth); formation and
+    filière are AND-combined single-value filters (spec v7); an
+    "Filtres actifs" chip row (a removable × chip per active
+    topic/category/search/formation/filière + "Tout effacer") appears
+    when anything is active. Sort, pill-toggling, the
+    Thèmes/Formation/Filière selects, the clear-on-incompatible
+    narrowing and the group headers are progressive
     enhancement: with JS blocked the cards, links, uniform action row
     and Branches disclosures remain fully usable, the pastilles are
-    INERT BUTTONS (visible topic metadata, no filtering) and the select
-    is an inert control. Visibility via the Tailwind ``hidden`` utility
+    INERT BUTTONS (visible topic metadata, no filtering), the selects
+    are inert controls and NO group headers are rendered; the static
+    build order (lecture cards already ordered formation -> filière ->
+    name) stands without JS. Visibility via the Tailwind ``hidden`` utility
     (safe now that the daisyUI .card{display:flex} override is gone).
 
 Branch/tag data is fetched per displayed repo (2 REST calls each,
@@ -154,8 +167,39 @@ STATUS_MUTED = ("frozen", "duplicate")
 # (fmt-ipynb is classification-only, review/github-actions/self-hosted
 # are workflow markers). Genuine compound topics (ci-cd, java-25, …)
 # PASS — they are real user-authored subjects.
-SYSTEM_TOPIC_PREFIXES = ("area-", "status-")
+SYSTEM_TOPIC_PREFIXES = ("area-", "status-", "formation-", "filiere-")
 SYSTEM_TOPICS = {"fmt-ipynb", "review", "github-actions", "self-hosted"}
+
+# Teaching axes (spec v7): formation-/filiere- topics are system metadata
+# (never pills), but they drive the Formation/Filière selects, the
+# grouping headers and the lecture default order. Slugs render with these
+# human labels; unknown slugs fall back to the raw slug.
+FORMATION_LABELS = {"cnam": "CNAM", "utln": "UTLN"}
+FILIERE_LABELS = {"mi-a2": "MI A2", "m1-info-math": "M1 Info Math",
+                  "m2-info-math": "M2 Info Math", "lp-ecmn": "LP ECMN"}
+
+
+def _axis_of(topics, prefix):
+    """First ``prefix``-tagged topic of a repo with the prefix stripped,
+    or "" when no such topic is present (spec v7 item 2)."""
+    for t in topics or []:
+        if t.startswith(prefix):
+            return t[len(prefix):]
+    return ""
+
+
+def _axis_label(labels, slug):
+    """Human label for an axis slug ("" stays "")."""
+    return labels.get(slug, slug) if slug else ""
+
+
+def _default_sortkey(c):
+    """Default-order key (spec v7 item 5): lecture cards sort by
+    formation -> filière -> lowercased name; every other card by name."""
+    if c["category"] == "lecture":
+        return "%s|%s|%s" % (c.get("formation", ""), c.get("filiere", ""),
+                             c["name"].lower())
+    return c["name"].lower()
 
 # A topic carried by at least this many cards lands in the "Fréquents"
 # optgroup of the Thèmes select (Tous les thèmes holds the remainder).
@@ -829,13 +873,21 @@ def _render_card(c):
     # data-catrank = category rank int (default-order key). All
     # quote-escaped; missing values -> "".
     esc_ts = html.escape(c["pushed_at"] or "", quote=True)
+    # Teaching axes baked as data attributes (spec v7): the Formation/
+    # Filière selects and the grouping headers read these; cards without
+    # the topics carry the empty string (inert for both axes).
+    esc_formation = html.escape(c.get("formation", ""), quote=True)
+    esc_filiere = html.escape(c.get("filiere", ""), quote=True)
+    esc_sortkey = html.escape(_default_sortkey(c), quote=True)
     parts = [
         '<article data-area="%s" data-topics="%s" data-search="%s" '
         'data-title="%s" data-ts="%s" data-catrank="%d" '
+        'data-formation="%s" data-filiere="%s" data-sortkey="%s" '
         'class="card rounded-lg border p-4 shadow-sm %s">'
         % (cat, esc_topics, esc_search,
            html.escape(c["name"].lower(), quote=True), esc_ts,
            CATEGORY_RANK.get(cat, CATEGORY_RANK["none"]),
+           esc_formation, esc_filiere, esc_sortkey,
            CATEGORY_TINT.get(cat, CATEGORY_TINT["none"])),
         '<div class="flex flex-wrap items-center gap-2">'
         '<span class="chip uppercase tracking-wide %s">%s</span>%s</div>'
@@ -1005,6 +1057,42 @@ def _render_index(cards, generated_at):
     topic_opts = ('<option value="">Thèmes…</option>'
                   + _optgroup("Fréquents", frequent)
                   + _optgroup("Tous les thèmes", others))
+    # Formation / Filière selects (spec v7 item 3): build-time options
+    # derived from the card axes, alphabetical, FR labels via the maps.
+    # Filière options carry data-formation (their pairing) so the JS can
+    # narrow them when a formation is selected; a filière whose cards
+    # have no formation lands in the "Autres" fallback group.
+    formations = sorted({c["formation"] for c in cards if c["formation"]})
+    formation_opts = '<option value="">Formation…</option>' + "".join(
+        '<option value="%s">%s</option>'
+        % (html.escape(f, quote=True),
+           html.escape(_axis_label(FORMATION_LABELS, f)))
+        for f in formations)
+    pairs = sorted({(c["formation"], c["filiere"]) for c in cards
+                    if c["filiere"]})
+    filiere_groups = []
+    orphaned = sorted({fi for f, fi in pairs if not f})
+    for f in formations:
+        fis = sorted(fi for ff, fi in pairs if ff == f)
+        if not fis:
+            continue
+        filiere_groups.append(
+            '<optgroup label="%s">%s</optgroup>'
+            % (html.escape(_axis_label(FORMATION_LABELS, f), quote=True),
+               "".join('<option value="%s" data-formation="%s">%s</option>'
+                       % (html.escape(fi, quote=True),
+                          html.escape(f, quote=True),
+                          html.escape(_axis_label(FILIERE_LABELS, fi)))
+                       for fi in fis)))
+    if orphaned:
+        filiere_groups.append(
+            '<optgroup label="Autres">%s</optgroup>'
+            % "".join('<option value="%s" data-formation="">%s</option>'
+                      % (html.escape(fi, quote=True),
+                         html.escape(_axis_label(FILIERE_LABELS, fi)))
+                      for fi in orphaned))
+    filiere_opts = ('<option value="">Filière…</option>'
+                    + "".join(filiere_groups))
     grid = "\n      ".join(_render_card(c) for c in cards)
     # Cache-buster for app.css (v6.3): compact UTC stamp of this generation
     # (YYYYMMDDHHMM). Changes every deploy -> new URL -> no stale heuristic
@@ -1057,14 +1145,34 @@ def _render_index(cards, generated_at):
                   class="h-11 w-full max-w-[12rem] rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700">
             %s
           </select>
+          <!-- Formation / Filière (spec v7 item 3): JS-only AND filters
+               over data-formation / data-filiere. The filière options
+               carry data-formation; the JS hides + disables the
+               incompatible ones when a formation is selected. -->
+          <select id="f-formation" aria-label="Filtrer par formation"
+                  class="h-11 w-full max-w-[12rem] rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700">
+            %s
+          </select>
+          <select id="f-filiere" aria-label="Filtrer par filière"
+                  class="h-11 w-full max-w-[12rem] rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700">
+            %s
+          </select>
           <label class="flex items-center gap-2 text-sm font-medium text-slate-600">Trier
             <select id="f-sort"
                     class="h-11 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700">
-              <option value="">Défaut (catégorie → nom)</option>
+              <option value="">Défaut (catégorie → formation → nom)</option>
               <option value="title-asc">Titre A→Z</option>
               <option value="title-desc">Titre Z→A</option>
               <option value="date-desc">Date récente</option>
               <option value="date-asc">Date ancienne</option>
+            </select>
+          </label>
+          <label class="flex items-center gap-2 text-sm font-medium text-slate-600">Grouper
+            <select id="f-group" aria-label="Grouper les résultats"
+                    class="h-11 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700">
+              <option value="">Aucune</option>
+              <option value="f">Formation</option>
+              <option value="f-f">Formation + filière</option>
             </select>
           </label>
           <button id="f-reset" type="button" class="f-btn">Réinitialiser</button>
@@ -1118,11 +1226,18 @@ def _render_index(cards, generated_at):
     const emptyEl = document.getElementById('empty');
     const sortSel = document.getElementById('f-sort');
     const topicSel = document.getElementById('f-topic');
+    const formationSel = document.getElementById('f-formation');
+    const filiereSel = document.getElementById('f-filiere');
+    const groupSel = document.getElementById('f-group');
     const afWrap = document.getElementById('active-filters');
     const afChips = document.getElementById('active-filters-chips');
     const total = cards.length;
     let cat = "all";
     const activeTopics = new Set();
+    // Axes d'enseignement (spec v7) : filtres AND mono-valeur,
+    // indépendants du Set multi de thèmes.
+    let formation = "";
+    let filiere = "";
 
     // <details>/<summary> : aria-expanded synchronisé sur l'état natif.
     document.querySelectorAll('details').forEach(d => {
@@ -1131,7 +1246,8 @@ def _render_index(cards, generated_at):
         s.setAttribute("aria-expanded", String(d.open)));
     });
 
-    // Filtre AND : catégorie x recherche x intersection des thèmes.
+    // Filtre AND : catégorie x recherche x intersection des thèmes
+    // x formation x filière (spec v7 item 3).
     function applyFilters() {
       const q = (search.value || "").trim().toLowerCase();
       const sel = [...activeTopics];
@@ -1140,12 +1256,69 @@ def _render_index(cards, generated_at):
         const topics = (c.dataset.topics || "").split(" ");
         const ok = (cat === "all" || c.dataset.area === cat)
           && (!q || (c.dataset.search || "").includes(q))
-          && sel.every(t => topics.includes(t));
+          && sel.every(t => topics.includes(t))
+          && (!formation || (c.dataset.formation || "") === formation)
+          && (!filiere || (c.dataset.filiere || "") === filiere);
         c.classList.toggle("hidden", !ok);
         if (ok) visible++;
       });
       countEl.textContent = visible + "/" + total;
       emptyEl.classList.toggle("hidden", visible !== 0);
+      applyGroups();
+    }
+
+    // Libellé d'un axe : textContent de l'option correspondante du
+    // select (le select est la source des libellés FR), slug en repli.
+    function axisLabel(sel, val) {
+      const o = [...sel.options].find(x => x.value === val);
+      return o ? o.textContent : val;
+    }
+
+    // Narrowing (spec v7 item 3) : formation choisie -> options de
+    // filière incompatibles masquées + désactivées, sélection
+    // éventuellement incompatible effacée.
+    function narrowFiliere() {
+      const f = formationSel.value;
+      [...filiereSel.options].forEach(o => {
+        if (!o.value) return;            // le placeholder reste actif
+        const ok = !f || o.dataset.formation === f;
+        o.hidden = !ok;
+        o.disabled = !ok;
+      });
+      if (filiere && formation &&
+          ![...filiereSel.options].some(o => o.value === filiere && !o.disabled)) {
+        filiere = "";
+        filiereSel.value = "";
+      }
+    }
+
+    // Regroupement (spec v7 item 4) : en-têtes .group-h devant la
+    // première carte VISIBLE de chaque groupe, dans l'ordre courant du
+    // DOM. Cartes sans formation jamais groupées. Nœuds construits à la
+    // main (jamais innerHTML) ; les en-têtes sont TOUJOURS retirés en
+    // début de passe (aucun résiduel après changement de filtre/mode).
+    function applyGroups() {
+      grid.querySelectorAll(".group-h").forEach(h => h.remove());
+      const mode = groupSel.value;
+      if (!mode) return;
+      let prev = "\u0000";
+      [...grid.children].forEach(el => {
+        if (el.tagName !== "ARTICLE" || el.classList.contains("hidden")) return;
+        const f = el.dataset.formation || "";
+        if (!f) return;
+        const fi = mode === "f-f" ? (el.dataset.filiere || "") : "";
+        const key = f + "|" + fi;
+        if (key === prev) return;
+        prev = key;
+        const h = document.createElement("div");
+        h.className = "group-h col-span-full";
+        h.setAttribute("role", "heading");
+        h.setAttribute("aria-level", "2");
+        h.textContent = fi
+          ? axisLabel(formationSel, f) + " \u2014 " + axisLabel(filiereSel, fi)
+          : axisLabel(formationSel, f);
+        grid.insertBefore(h, el);
+      });
     }
 
     // Tri (spec v6 item 3) : réordonne TOUTES les cartes (visibles et
@@ -1223,8 +1396,26 @@ def _render_index(cards, generated_at):
           update();
         }));
       });
+      if (formation) {
+        afChips.appendChild(xChip(axisLabel(formationSel, formation),
+          "Retirer la formation", () => {
+            formation = "";
+            formationSel.value = "";
+            narrowFiliere();
+            update();
+          }));
+      }
+      if (filiere) {
+        afChips.appendChild(xChip(axisLabel(filiereSel, filiere),
+          "Retirer la filière", () => {
+            filiere = "";
+            filiereSel.value = "";
+            update();
+          }));
+      }
       afWrap.classList.toggle("hidden",
-        cat === "all" && !q && activeTopics.size === 0);
+        cat === "all" && !q && activeTopics.size === 0
+        && !formation && !filiere);
     }
 
     // Le select "Thèmes" est une UI mono-sélection sur le Set multi
@@ -1284,9 +1475,26 @@ def _render_index(cards, generated_at):
       else activeTopics.add(t);
       update();
     });
+    // Formation / Filière (spec v7) : changements AND + narrowing ;
+    // Grouper rejoue filtres + en-têtes (aucune puce, ce n'est pas un filtre).
+    formationSel.addEventListener("change", () => {
+      formation = formationSel.value;
+      narrowFiliere();
+      update();
+    });
+    filiereSel.addEventListener("change", () => {
+      filiere = filiereSel.value;
+      update();
+    });
+    groupSel.addEventListener("change", applyFilters);
     function clearFilters() {
       search.value = "";
       activeTopics.clear();
+      formation = "";
+      filiere = "";
+      formationSel.value = "";
+      filiereSel.value = "";
+      narrowFiliere();
       setCat("all");   // -> update() complet (puces + pastilles + filtres)
     }
     document.getElementById("f-reset").addEventListener("click", clearFilters);
@@ -1303,7 +1511,8 @@ def _render_index(cards, generated_at):
   </script>
 </body>
 </html>
- """ % (css_ver, "\n          ".join(chip_btns), topic_opts, count, count,
+ """ % (css_ver, "\n          ".join(chip_btns), topic_opts,
+        formation_opts, filiere_opts, count, count,
         grid, _gen_date_fr(generated_at), count)
 
 
@@ -1349,6 +1558,8 @@ def main():
             "private": bool(r.get("private")),
             "status": _status_of(r),
             "ipynb": "fmt-ipynb" in (r.get("topics") or []),
+            "formation": _axis_of(r.get("topics"), "formation-"),
+            "filiere": _axis_of(r.get("topics"), "filiere-"),
             "pushed_at": r.get("pushed_at"),
             "updated": _abs_datetime_fr(r.get("pushed_at")),
             "github_url": r.get("html_url")
@@ -1366,13 +1577,14 @@ def main():
     print("Branches/tags: %d repos in %.1fs" %
           (len(cards), time.time() - extras_started))
 
-    # Deterministic default order (spec v6.2 item 6): full-taxonomy
-    # category rank, then repo full name A->Z (lowercased key matching
-    # data-title; raw name as tie-breaker). The JS "Défaut" option and the
-    # originalOrder snapshot reuse this DOM order as-is.
+    # Deterministic default order (spec v6.2 item 6, refined v7 item 5):
+    # full-taxonomy category rank, then the baked data-sortkey (lecture
+    # cards: formation -> filière -> name; every other card: name), raw
+    # name as tie-breaker. The JS "Défaut" option and the originalOrder
+    # snapshot reuse this DOM order as-is.
     cards.sort(key=lambda c: (
         CATEGORY_RANK.get(c["category"], CATEGORY_RANK["none"]),
-        c["name"].lower(), c["name"]))
+        _default_sortkey(c), c["name"]))
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
