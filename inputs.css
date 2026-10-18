@@ -84,6 +84,15 @@
     @apply border-indigo-700 bg-indigo-700 text-white
       hover:border-indigo-800 hover:bg-indigo-800 hover:text-white;
   }
+  /* v6.3: the base focus ring is #4338ca — exactly indigo-700, i.e. the
+     pressed ground — so it vanishes on the active category button. A
+     white ring drawn INSIDE the button (negative offset) keeps AA
+     non-text contrast against both indigo-700 and indigo-800 (hover)
+     and is independent of the surrounding panel colour. */
+  .f-btn[aria-pressed="true"]:focus-visible {
+    outline-color: #fff;
+    outline-offset: -2px;
+  }
 
   /* Sober status chips: dark text on light tinted ground (AA). */
   .chip {

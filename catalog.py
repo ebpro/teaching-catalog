@@ -1006,6 +1006,10 @@ def _render_index(cards, generated_at):
                   + _optgroup("Fréquents", frequent)
                   + _optgroup("Tous les thèmes", others))
     grid = "\n      ".join(_render_card(c) for c in cards)
+    # Cache-buster for app.css (v6.3): compact UTC stamp of this generation
+    # (YYYYMMDDHHMM). Changes every deploy -> new URL -> no stale heuristic
+    # cache of the stylesheet (see the <link> comment below).
+    css_ver = generated_at[:16].replace("-", "").replace(":", "").replace("T", "")
     return """<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -1015,8 +1019,13 @@ def _render_index(cards, generated_at):
   <title>Supports pédagogiques · Emmanuel BRUNO</title>
   <!-- Tailwind v3 purgé, généré au build CI (inputs.css -> public/app.css).
        Aucun CDN : la page est mise en page intégralement même si les
-       requêtes tierces sont bloquées et sans FOUC. -->
-  <link rel="stylesheet" href="app.css">
+       requêtes tierces sont bloquées et sans FOUC.
+       v6.3: le query de version (horodatage UTC de la génération) force
+       le rechargement du CSS à chaque déploiement — le serveur applique
+       une fraîcheur heuristique (aucun Cache-Control), un app.css daté
+       masque les états "pressé" recém-publiés (le HTML, lui, est
+       revalidé à chaque navigation). -->
+  <link rel="stylesheet" href="app.css?v=%s">
 </head>
 <body class="min-h-screen bg-slate-50 text-slate-900 antialiased">
   <a class="skip-link" href="#grid">Aller au catalogue</a>
@@ -1294,8 +1303,8 @@ def _render_index(cards, generated_at):
   </script>
 </body>
 </html>
- """ % ("\n          ".join(chip_btns), topic_opts, count, count, grid,
-        _gen_date_fr(generated_at), count)
+ """ % (css_ver, "\n          ".join(chip_btns), topic_opts, count, count,
+        grid, _gen_date_fr(generated_at), count)
 
 
 
