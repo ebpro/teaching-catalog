@@ -121,13 +121,16 @@
   button.chip-topic:not(.chip-pill-active):hover {
     @apply border-indigo-700 text-indigo-700;
   }
-  /* Pressed pill: indigo tint (single accent = "this filter is on"),
-     indigo-800 on indigo-50 stays AA. Same-specificity rule placed
-     AFTER .chip-topic so the tint wins on the shared properties.
+  /* Pressed pill (v6.2 item 3): explicit visible background on the
+     toggle's active state — strengthened from indigo-50/200 to
+     indigo-100/300 because the cards are now pastel-tinted (item 7) and
+     a 50-tint pressed pill blended into 50-tint card grounds.
+     indigo-800 on indigo-100 stays AA (>=7:1). Same-specificity rule
+     placed AFTER .chip-topic so the tint wins on the shared properties.
      (Name note: .chip-active is already taken by the emerald STATUS
      chip — the pressed pill gets its own class, no collision.) */
   .chip-pill-active {
-    @apply border-indigo-200 bg-indigo-50 font-mono text-indigo-800;
+    @apply border-indigo-300 bg-indigo-100 font-mono text-indigo-800;
   }
   /* Removable "Filtres actifs" × chips and the "Tout effacer" action:
      same chip geometry, button affordance. */
@@ -147,10 +150,17 @@
       border border-slate-200 bg-white shadow-lg;
   }
 
-  /* Caret on disclosure summaries (CSS-drawn, no icon font/emoji). */
+  /* Caret on disclosure summaries (CSS-drawn, no icon font/emoji).
+     v6.2 item 4 — FIXED RESERVED TRACK: the 8px glyph carries symmetric
+     3px horizontal margins, so it occupies a constant 14px (w-3.5
+     class) slot; the rotated glyph's bounding box (~11.3px diagonal)
+     stays inside the track in BOTH rotation states. The summary's
+     rendered width is therefore rotation-invariant — opening Branches
+     never changes the footer row width and never re-wraps the line. */
   .chev::after {
     content: "";
-    @apply ml-2 inline-block h-2 w-2 border-b-2 border-r-2 border-slate-500;
+    @apply inline-block h-2 w-2 border-b-2 border-r-2 border-slate-500;
+    margin: 0 3px 0 0.5rem; /* 3px right / 8px left, constant in all states */
     transform: rotate(45deg);
   }
   details[open] > .chev::after {

@@ -8,37 +8,53 @@ self-contained static card grid of the teaching surface under ``./public/``:
     ``lecture-`` -> Lecture, ``notebook-`` -> Notebook, ``sample-`` ->
     Samples (+ FORCED_SAMPLES names); archived repos, repos carrying the
     ``status-legacy`` topic and non-matching names are excluded entirely,
-  * card content (v6 sober mobile-first layout): a meta row with the
-    category label + status chip (colour-coded, dark text on light tint),
-    the human description as the primary line (2-line clamp) and the repo
-    name as a small monospace secondary line, verbatim GitHub topic
-    pastilles (neutral chips, area-* omitted) rendered as filter TOGGLE
-    buttons, and a uniform action row that ALWAYS shows the 4 slots
-    ``Stable · Latest · Branches · Source`` in that order: a missing
-    target renders as a disabled placeholder (unfocusable
+  * card content (v6.2 sober mobile-first layout): the card surface is
+    tinted by category (pastel Tailwind literals baked from the
+    ``CATEGORY_TINT`` dict), and the meta row carries the category label
+    CHIP (``CATEGORY_CHIP`` literals) + status chip (colour-coded, dark
+    text on light tint). The human description is the primary line
+    (2-line clamp) and the repo name a small monospace secondary line
+    linking GitHub (that name link is the single "source" affordance —
+    the v6 Source footer slot was removed in v6.2). Topic pastilles are
+    the repo's REAL GitHub topics minus the system ones
+    (``SYSTEM_TOPIC_PREFIXES`` area-/status- and ``SYSTEM_TOPICS``
+    fmt-ipynb/review/github-actions/self-hosted — labelling noise, not
+    teaching subjects), sorted alphabetically and rendered as filter
+    TOGGLE buttons. The uniform action row ALWAYS shows the 3 slots
+    ``Stable · Latest · Branches`` in that order: a missing target
+    renders as a disabled placeholder (unfocusable
     ``<span class="lnk lnk-disabled" aria-disabled="true">`` with an
     explanatory ``title``, same box size as the enabled slots), never a
     hidden slot. Stable (solid accent) is enabled only when the repo has
     a ``v*`` tag; Branches is the native <details> disclosure (enabled
-    only with >=1 non-default branch); Source links public repos only.
-    Enabled slots keep the >=44px tap targets. The date line is an
-    ABSOLUTE short French date inside ``<time datetime>`` (full ISO in
-    the datetime attribute and the title) — no clock-dependent JS text
+    only with >=1 non-default branch). Enabled slots keep the >=44px tap
+    targets; the Branches caret sits in a fixed reserved track so the
+    summary width never changes with the open/close rotation (no row
+    jitter). The date line is an ABSOLUTE French date WITH time
+    (``17 oct. 2026 14:32``, pushed_at converted UTC -> Europe/Paris via
+    stdlib ``zoneinfo``; fixed UTC+1 + "heure locale" label when tzdata
+    is unavailable) inside ``<time datetime>`` (full UTC ISO in the
+    datetime attribute and the title) — no clock-dependent JS text
     anywhere (v6 removed the "il y a X" rewrite: it drifted between
     builds, user complaint).
   * filters: sticky slim header with live search; filter panel collapsed
     behind a "Filtres" toggle below lg, inline from lg up; category
-    segmented control (aria-pressed), sort select (JS reorders the
-    <article> nodes, build order is the default) and result count.
-    Topics are filtered by CLICKING the pastilles on the cards (AND
-    intersection semantics; one Set is the single source of truth); an
-    "Filtres actifs" chip row (a removable × chip per active
+    segmented control (aria-pressed), a "Thèmes…" select (options sorted
+    into Fréquents/Tous les thèmes <optgroup>s, >=5 cards = frequent) as
+    a keyboard-accessible way to reach any topic without hunting cards,
+    sort select (JS reorders the <article> nodes) and result count.
+    The default order (build order and the "Défaut" sort option) is
+    deterministic: category rank (``CATEGORY_RANK``, lecture -> … ->
+    student) then repo full name A->Z. Pills and the select toggle into
+    the SAME active-topic Set (AND intersection semantics, one source of
+    truth); an "Filtres actifs" chip row (a removable × chip per active
     topic/category/search + "Tout effacer") appears when anything is
-    active. Sort and pill-toggling are progressive enhancement: with JS
-    blocked the cards, links, uniform action row and Branches
-    disclosures remain fully usable and the pastilles are inert labels.
-    Visibility via the Tailwind ``hidden`` utility (safe now that the
-    daisyUI .card{display:flex} override is gone).
+    active. Sort, pill-toggling and the Thèmes select are progressive
+    enhancement: with JS blocked the cards, links, uniform action row
+    and Branches disclosures remain fully usable, the pastilles are
+    INERT BUTTONS (visible topic metadata, no filtering) and the select
+    is an inert control. Visibility via the Tailwind ``hidden`` utility
+    (safe now that the daisyUI .card{display:flex} override is gone).
 
 Branch/tag data is fetched per displayed repo (2 REST calls each,
 ThreadPool(8)); a per-repo fetch failure degrades to a DISABLED placeholder
@@ -71,7 +87,19 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+# Card timestamps are shown in Europe/Paris (spec v6.2 item 1). stdlib
+# zoneinfo (Py3.9+, CI runs 3.12) resolves it from the system tzdata or the
+# ``tzdata`` PyPI package; on a bare image without either, ZoneInfo raises
+# ZoneInfoNotFoundError at import-eval time -> _PARIS_TZ stays None and
+# _abs_datetime_fr falls back to a FIXED UTC+1 offset honestly labelled
+# "heure locale" (approximate across DST, better than a silent wrong zone).
+try:
+    from zoneinfo import ZoneInfo
+    _PARIS_TZ = ZoneInfo("Europe/Paris")
+except Exception:  # noqa: BLE001 - ImportError / ZoneInfoNotFoundError / OSError
+    _PARIS_TZ = None
 
 # --- configuration --------------------------------------------------------
 
@@ -119,10 +147,87 @@ STATUS_CHIP = {
 # Statuses rendered with reduced emphasis.
 STATUS_MUTED = ("frozen", "duplicate")
 
-# Topic prefixes omitted from card badges and from the topic filter:
-# area-* is redundant with the category label in the card meta row
-# (spec v3 item 5).
-BADGE_EXCLUDED_PREFIXES = ("area-",)
+# Topic hygiene (spec v6.2 item 5): org-labelling machinery is NOT a
+# teaching subject — these topics render on neither the card pills nor the
+# Thèmes select. area-* is redundant with the category label, status-*
+# with the status chip; the set members are labelling/CI noise
+# (fmt-ipynb is classification-only, review/github-actions/self-hosted
+# are workflow markers). Genuine compound topics (ci-cd, java-25, …)
+# PASS — they are real user-authored subjects.
+SYSTEM_TOPIC_PREFIXES = ("area-", "status-")
+SYSTEM_TOPICS = {"fmt-ipynb", "review", "github-actions", "self-hosted"}
+
+# A topic carried by at least this many cards lands in the "Fréquents"
+# optgroup of the Thèmes select (Tous les thèmes holds the remainder).
+TOPIC_FREQUENT_MIN = 5
+
+# Deterministic default order (spec v6.2 item 6): category rank first,
+# then repo full name A->Z. Ranks cover the whole org taxonomy, not only
+# the three rendered categories, so the baked data-catrank stays meaningful
+# if the surface widens. Unknown categories rank last (11).
+CATEGORY_RANK = {
+    "lecture": 0,
+    "notebook": 1,
+    "sample": 2,
+    "standard": 3,
+    "reference": 4,
+    "image": 5,
+    "cicd": 6,
+    "infra": 7,
+    "meta": 8,
+    "personal": 9,
+    "student": 10,
+    "none": 11,
+}
+
+# Pastel card tints per category (spec v6.2 item 7). PURGE-SAFE BY
+# CONSTRUCTION: the values are complete literal Tailwind class strings in
+# this file (the Tailwind content source), never composed from the hue —
+# the CLI emits exactly these into app.css.
+CATEGORY_TINT = {
+    "lecture": "bg-sky-50 border-sky-200",
+    "notebook": "bg-emerald-50 border-emerald-200",
+    "sample": "bg-amber-50 border-amber-200",
+    "standard": "bg-slate-100 border-slate-200",
+    "reference": "bg-violet-50 border-violet-200",
+    "image": "bg-lime-50 border-lime-200",
+    "cicd": "bg-teal-50 border-teal-200",
+    "infra": "bg-indigo-50 border-indigo-200",
+    "meta": "bg-cyan-50 border-cyan-200",
+    "personal": "bg-rose-50 border-rose-200",
+    "student": "bg-fuchsia-50 border-fuchsia-200",
+    "none": "bg-white border-slate-200",
+}
+
+# Category label chip colours (meta row), same literal-class rule:
+# text-<hue>-800 on bg-<hue>-100 (>=7:1 on white-class tints, AA+) with a
+# matching border literal for definition against the identically-hued card
+# tint. slate hues get a step darker border so the chip separates from the
+# standard card ground (bg-slate-100).
+CATEGORY_CHIP = {
+    "lecture": "text-sky-800 bg-sky-100 border-sky-200",
+    "notebook": "text-emerald-800 bg-emerald-100 border-emerald-200",
+    "sample": "text-amber-800 bg-amber-100 border-amber-200",
+    "standard": "text-slate-800 bg-slate-100 border-slate-300",
+    "reference": "text-violet-800 bg-violet-100 border-violet-200",
+    "image": "text-lime-800 bg-lime-100 border-lime-200",
+    "cicd": "text-teal-800 bg-teal-100 border-teal-200",
+    "infra": "text-indigo-800 bg-indigo-100 border-indigo-200",
+    "meta": "text-cyan-800 bg-cyan-100 border-cyan-200",
+    "personal": "text-rose-800 bg-rose-100 border-rose-200",
+    "student": "text-fuchsia-800 bg-fuchsia-100 border-fuchsia-200",
+    "none": "text-slate-800 bg-slate-100 border-slate-200",
+}
+
+
+def _display_topics(topics):
+    """Alphabetically sorted non-system topics of a repo (spec v6.2 item 5):
+    single source of truth for card pills, the card ``data-topics`` filter
+    haystack and the Thèmes select options — so what you see is what
+    filters."""
+    return sorted(
+        t for t in (topics or [])
+        if not t.startswith(SYSTEM_TOPIC_PREFIXES) and t not in SYSTEM_TOPICS)
 
 
 # --- API layer ------------------------------------------------------------
@@ -599,20 +704,34 @@ MONTHS_FR = ("janv.", "févr.", "mars", "avr.", "mai", "juin",
              "juil.", "août", "sept.", "oct.", "nov.", "déc.")
 
 
-def _abs_date_fr(iso):
-    """``2026-10-14T08:12:00Z`` -> ``14 oct. 2026`` (absolute, build-time).
+def _abs_datetime_fr(iso):
+    """``2026-10-17T12:32:00Z`` -> ``17 oct. 2026 14:32`` (build-time).
 
-    Spec v6: the visible text is the ABSOLUTE date only (accurate at any
-    read time). The v4/v5 JS rewrite to "il y a X" was removed: it drifted
-    between builds (the page is static, the clock is not — user complaint).
-    The full ISO timestamp travels in the ``datetime``/``title`` attributes
-    of the rendered ``<time>`` element.
+    Spec v6.2 item 1: absolute French date PLUS HH:MM time, the pushed_at
+    UTC instant converted to Europe/Paris via stdlib zoneinfo (DST-aware).
+    When tzdata is unavailable (_PARIS_TZ None, bare CI/dev image) the
+    conversion falls back to a fixed UTC+1 offset and the label
+    ``heure locale`` is appended, so the page never asserts a precision it
+    does not have. Still fully ABSOLUTE: no clock-dependent JS text
+    anywhere (the v4/v5 "il y a X" rewrite drifted between builds and was
+    removed in v6). The full UTC ISO timestamp travels in the ``datetime``
+    /``title`` attributes of the rendered ``<time>`` element (machine
+    readable, zone-explicit).
     """
     try:
         dt = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ")
     except (TypeError, ValueError):
         return None
-    return "%d %s %d" % (dt.day, MONTHS_FR[dt.month - 1], dt.year)
+    dt = dt.replace(tzinfo=timezone.utc)
+    if _PARIS_TZ is not None:
+        local = dt.astimezone(_PARIS_TZ)
+        return "%d %s %d %s" % (
+            local.day, MONTHS_FR[local.month - 1], local.year,
+            local.strftime("%H:%M"))
+    local = dt.astimezone(timezone(timedelta(hours=1)))
+    return "%d %s %d %s heure locale" % (
+        local.day, MONTHS_FR[local.month - 1], local.year,
+        local.strftime("%H:%M"))
 
 
 def _gen_date_fr(iso_utc):
@@ -657,54 +776,71 @@ def _disabled_slot(label, title):
 
 
 def _render_card(c):
-    """Return the <article> for one catalog entry ``c`` (v6 sober layout).
+    """Return the <article> for one catalog entry ``c`` (v6.2 sober layout).
 
-    Hierarchy: a meta row (category label + status chip), then the human
-    description as the primary line (line-clamp-2, links to the primary
-    site path); the repo name as a small monospace secondary line linking
-    GitHub (fallback: with no description, the name becomes the primary
-    line). Topics are neutral monospace pastilles rendered as filter
-    TOGGLE buttons (``data-topic`` + ``aria-pressed``; the JS toggles
-    them into the active topic set — progressive enhancement, inert
-    labels without JS). The footer is a UNIFORM 4-slot action row,
-    always in the order Stable · Latest · Branches · Source (spec v6):
-    an unavailable target (no v* tag / no non-default branch / private
-    repo) renders a disabled placeholder slot instead of disappearing.
-    Enabled slots are >=44px tap targets. The date line is an absolute
-    short French date inside ``<time datetime>`` (full ISO in the
-    datetime/title attributes, no JS clock text). ``data-title`` (lower-
-    cased name) and ``data-ts`` (pushed_at ISO) on the <article> back the
-    JS sort control.
+    Hierarchy: the card ground is a pastel tint keyed to the category
+    (``CATEGORY_TINT`` literal classes, purge-safe); a meta row carries
+    the category label CHIP (``CATEGORY_CHIP`` literals) + status chip;
+    then the human description as the primary line (line-clamp-2, links
+    to the primary site path); the repo name as a small monospace
+    secondary line linking GitHub (this name link is the source
+    affordance — the v6 Source footer slot was removed in v6.2). Topics
+    are the non-system GitHub topics (see _display_topics), sorted
+    alphabetically, as neutral monospace filter TOGGLE buttons
+    (``data-topic`` + ``aria-pressed``; the JS toggles them into the
+    active topic set — progressive enhancement, INERT buttons without
+    JS). The footer is a UNIFORM 3-slot action row, always in the order
+    Stable · Latest · Branches (spec v6.2 item 2): an unavailable target
+    (no v* tag / no non-default branch) renders a disabled placeholder
+    slot instead of disappearing. Enabled slots are >=44px tap targets.
+    The Branches <summary> caret lives in a fixed reserved track so the
+    disclosure never changes row width (.chev::after, inputs.css). The
+    date line is an absolute French date WITH HH:MM time inside ``<time
+    datetime>`` (full UTC ISO in the datetime/title attributes, Europe/
+    Paris display, no JS clock text). ``data-title`` (lower-cased name),
+    ``data-ts`` (pushed_at ISO) and ``data-catrank`` (category rank int,
+    spec v6.2 item 6) on the <article> back the JS sort control.
     """
     cat = c["category"]
     # Muted statuses (frozen/duplicate) are de-emphasised LOCALLY: a neutral
-    # chip-muted status pastille + slate-600 name/date meta lines. No
-    # card-level transparency (the old 60% opacity washed the slate-500 text
-    # below AA contrast, review P1-a). Footer links keep their normal AA
-    # colours.
+    # chip-muted status pastille. No card-level transparency (the old 60%
+    # opacity washed the text below AA contrast, review P1-a). Footer links
+    # keep their normal AA colours.
     is_muted = c["status"] in STATUS_MUTED
-    meta_text = "text-slate-600" if is_muted else "text-slate-500"
+    # v6.2 AA audit (measured on the compiled palette): slate-500 lands at
+    # 4.26-4.46:1 on 6 of the 12 pastel card tints -- BELOW AA. The meta
+    # lines therefore use slate-600 on every card (>=6.7:1 on all tints);
+    # muted vs active stays differentiated by the status pastille
+    # (chip-muted vs status chip), not by washing the text. The old
+    # contract idea of "darkening the tint" is directionally wrong here:
+    # a darker ground lowers contrast further for dark text.
+    meta_text = "text-slate-600"
     esc_name = html.escape(c["name"])
     esc_desc = html.escape(c["description"] or "")
-    esc_topics = html.escape(" ".join(c["topics"]), quote=True)
+    card_topics = _display_topics(c["topics"])
+    esc_topics = html.escape(" ".join(card_topics), quote=True)
     # Search haystack (name + description, lowercased): the JS filters on
     # this plain attribute -> no JSON-in-attribute quoting bug class.
     esc_search = html.escape(
         (c["name"] + " " + (c["description"] or "")).lower(), quote=True)
-    # Sort keys baked as data attributes (spec v6 item 3): data-title =
-    # lowercased repo name (stable lexicographic key), data-ts = pushed_at
-    # ISO (chronological key). Both quote-escaped; missing values -> "".
+    # Sort keys baked as data attributes (spec v6 item 3, rank added in
+    # v6.2 item 6): data-title = lowercased repo name (stable
+    # lexicographic key), data-ts = pushed_at ISO (chronological key),
+    # data-catrank = category rank int (default-order key). All
+    # quote-escaped; missing values -> "".
     esc_ts = html.escape(c["pushed_at"] or "", quote=True)
     parts = [
         '<article data-area="%s" data-topics="%s" data-search="%s" '
-        'data-title="%s" data-ts="%s" '
-        'class="card rounded-lg border border-slate-200 p-4 shadow-sm">'
+        'data-title="%s" data-ts="%s" data-catrank="%d" '
+        'class="card rounded-lg border p-4 shadow-sm %s">'
         % (cat, esc_topics, esc_search,
-           html.escape(c["name"].lower(), quote=True), esc_ts),
+           html.escape(c["name"].lower(), quote=True), esc_ts,
+           CATEGORY_RANK.get(cat, CATEGORY_RANK["none"]),
+           CATEGORY_TINT.get(cat, CATEGORY_TINT["none"])),
         '<div class="flex flex-wrap items-center gap-2">'
-        '<span class="text-[13px] font-medium uppercase tracking-wide '
-        'text-slate-600">%s</span>%s</div>'
-        % (CATEGORY_LABELS[cat].upper(), _status_chip(c["status"], is_muted)),
+        '<span class="chip uppercase tracking-wide %s">%s</span>%s</div>'
+        % (CATEGORY_CHIP.get(cat, CATEGORY_CHIP["none"]),
+           CATEGORY_LABELS[cat].upper(), _status_chip(c["status"], is_muted)),
     ]
     # Primary line links to the site: ``stable/`` when the repo has a v* tag
     # (same condition as the Stable button), ``develop/`` otherwise.
@@ -727,15 +863,18 @@ def _render_card(c):
             'class="mt-1 block break-all text-base font-semibold '
             'text-slate-900 hover:text-indigo-700 hover:underline">'
             '%s</a>' % (primary_url, esc_name))
-    # Topic pastilles = filter TOGGLES (spec v6 item 4): actual GitHub
-    # topics verbatim (no synthetic labels), minus area-*, as neutral
+    # Topic pastilles = filter TOGGLES (spec v6 item 4, hygiene v6.2 item
+    # 5): the repo's non-system topics (see _display_topics — area-*,
+    # status-* and the SYSTEM_TOPICS markers are labelling machinery, not
+    # subjects, and render nowhere), sorted alphabetically, as neutral
     # monospace BUTTONS carrying data-topic + aria-pressed="false". The
-    # JS toggles the topic into the single active-topic Set and syncs
-    # every same-topic pill on every card (pressed style: chip-pill-active
-    # + aria-pressed). Without JS they are inert labels (progressive
-    # enhancement) — the card content and links stay fully usable.
-    pills = [t for t in c["topics"]
-             if not t.startswith(BADGE_EXCLUDED_PREFIXES)]
+    # JS toggles the topic into the single active-topic Set (shared with
+    # the Thèmes select and the × chips) and syncs every same-topic pill
+    # on every card (pressed style: chip-pill-active + aria-pressed).
+    # Without JS they are INERT BUTTONS (progressive enhancement) — the
+    # card content and links stay fully usable; they remain the no-JS
+    # visible topic metadata.
+    pills = card_topics
     if pills:
         parts.append(
             '<div class="mt-3 flex flex-wrap gap-1">%s</div>'
@@ -747,10 +886,15 @@ def _render_card(c):
                    html.escape(t))
                 for t in pills))
 
-    # Uniform action row (spec v6 item 1): ALWAYS the 4 slots in the order
-    # Stable · Latest · Branches · Source. A missing target is a disabled
-    # placeholder (unfocusable span, aria-disabled, explanatory title),
-    # never a hidden slot, so every card row has the same shape.
+    # Uniform action row (spec v6 item 1, Source slot removed in v6.2
+    # item 2): ALWAYS the 3 slots in the order Stable · Latest · Branches.
+    # A missing target is a disabled placeholder (unfocusable span,
+    # aria-disabled, explanatory title), never a hidden slot, so every
+    # card row has the same shape. The GitHub source stays one click away
+    # via the repo-name subtitle link. The row is flex-nowrap (measured:
+    # the three slots fit one line inside a 360px card; gap tightens below
+    # sm as margin) and the Branches caret occupies a fixed track (v6.2
+    # item 4) so opening the disclosure never re-wraps the row.
     links = []
     # Stable: solid accent, only enabled when the repo has a v* tag; points
     # at the canonical ``stable/`` pointer path written by the deploy-static
@@ -789,22 +933,14 @@ def _render_card(c):
             '</details>' % items)
     else:
         links.append(_disabled_slot("Branches", "Aucune branche"))
-    # Source: link for public repos (user requirement, spec v3 item 6);
-    # disabled labeled placeholder for private ones.
-    if not c["private"]:
-        links.append(
-            '<a class="lnk" href="%s" target="_blank" '
-            'rel="noopener">Source</a>' % c["github_url"])
-    else:
-        links.append(_disabled_slot("Source", "Dépôt privé"))
     parts.append(
-        '<footer class="mt-4 flex flex-wrap items-center gap-2">%s</footer>'
-        % "".join(links))
-    # Date: ABSOLUTE short French date, build-time baked (spec v6 item 2).
-    # The <time> element carries the full ISO timestamp in datetime (and
-    # title as a plain-text fallback); no JS rewrites clock-dependent text
-    # anywhere on the card.
-    abs_date = _abs_date_fr(c["pushed_at"])
+        '<footer class="mt-4 flex flex-nowrap items-center '
+        'gap-1.5 sm:gap-2">%s</footer>' % "".join(links))
+    # Date: ABSOLUTE French date + HH:MM (Europe/Paris at build time,
+    # spec v6.2 item 1). The <time> element carries the full UTC ISO
+    # timestamp in datetime (and title as a plain-text fallback); no JS
+    # rewrites clock-dependent text anywhere on the card.
+    abs_date = _abs_datetime_fr(c["pushed_at"])
     if abs_date:
         parts.append(
             '<div class="mt-3 text-[13px] %s">Mis à jour '
@@ -823,11 +959,13 @@ def _render_index(cards, generated_at):
     index.html). Layout is mobile-first: sticky 56px header carrying the
     live search, filter panel collapsed behind a "Filtres" toggle below lg
     and inline from lg up, 1/2/3-column card grid. The panel holds the
-    category segmented control, the sort select and the result count
-    (spec v6: the topic checkbox dropdown is gone — topics are filtered
-    by clicking the pastilles on the cards); an "Filtres actifs" chip row
-    sits between the panel and the grid, shown by JS when any
-    topic/category/search filter is active.
+    category segmented control, the "Thèmes…" topic select (spec v6.2
+    item 5: non-system topics only, two alphabetical <optgroup>s —
+    "Fréquents" for topics present in >= TOPIC_FREQUENT_MIN cards, "Tous
+    les thèmes" for the rest; a JS-only enhancement giving keyboard users
+    a single place to reach any topic), the sort select and the result
+    count; an "Filtres actifs" chip row sits between the panel and the
+    grid, shown by JS when any topic/category/search filter is active.
     """
     count = len(cards)
     # Category segmented control: real buttons, the selected one marked
@@ -843,6 +981,30 @@ def _render_index(cards, generated_at):
             '<button type="button" data-cat="%s" aria-pressed="false" '
             'class="f-btn">%s (%d)</button>'
             % (a, CATEGORY_LABELS[a], tally[a]))
+    # Thèmes select options (spec v6.2 item 5): card-frequency tally over
+    # the non-system topics, split into two alphabetically sorted groups.
+    # Option texts/values are html-escaped (topics are user-authored).
+    topic_counts = {}
+    for c in cards:
+        for t in _display_topics(c["topics"]):
+            topic_counts[t] = topic_counts.get(t, 0) + 1
+    frequent = sorted(t for t, n in topic_counts.items()
+                      if n >= TOPIC_FREQUENT_MIN)
+    others = sorted(t for t, n in topic_counts.items()
+                    if n < TOPIC_FREQUENT_MIN)
+
+    def _optgroup(label, ts):
+        if not ts:
+            return ""
+        return ('<optgroup label="%s">%s</optgroup>'
+                % (html.escape(label, quote=True),
+                   "".join('<option value="%s">%s</option>'
+                           % (html.escape(t, quote=True), html.escape(t))
+                           for t in ts)))
+
+    topic_opts = ('<option value="">Thèmes…</option>'
+                  + _optgroup("Fréquents", frequent)
+                  + _optgroup("Tous les thèmes", others))
     grid = "\n      ".join(_render_card(c) for c in cards)
     return """<!DOCTYPE html>
 <html lang="fr">
@@ -879,10 +1041,17 @@ def _render_index(cards, generated_at):
           %s
         </div>
         <div class="flex flex-wrap items-center gap-3 lg:ml-auto">
+          <!-- Thèmes (spec v6.2 item 5): JS-only enhancement — it toggles
+               into the same active-topic Set as the card pills; without
+               JS it is inert (the pills remain the visible metadata). -->
+          <select id="f-topic" aria-label="Filtrer par thème"
+                  class="h-11 w-full max-w-[12rem] rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700">
+            %s
+          </select>
           <label class="flex items-center gap-2 text-sm font-medium text-slate-600">Trier
             <select id="f-sort"
                     class="h-11 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700">
-              <option value="">Défaut (catégorie)</option>
+              <option value="">Défaut (catégorie → nom)</option>
               <option value="title-asc">Titre A→Z</option>
               <option value="title-desc">Titre Z→A</option>
               <option value="date-desc">Date récente</option>
@@ -916,17 +1085,21 @@ def _render_index(cards, generated_at):
     <span>Contact : <a class="text-indigo-700 hover:underline" href="mailto:emmanuel.bruno@univ-tln.fr">emmanuel.bruno@univ-tln.fr</a></span>
   </footer>
   <script>
-    // Filtres v6 : recherche + catégorie (groupe exclusif, aria-pressed)
-    // + thèmes activés par les PASTILLES des cartes (intersection AND, un
-    // seul Set "activeTopics" comme source de vérité) + tri JS (replace
-    // les <article> dans le DOM). La visibilité des cartes est pilotée
-    // par la classe utilitaire "hidden" (display:none). Enrichissement
-    // progressif : sans JS, cartes/liens/dépliants Branches restent
-    // pleinement utilisables, les pastilles sont des étiquettes inertes
-    // et l'ordre de construction (catégorie puis nom) s'applique.
-    // Les dates sont absolues au build : AUCUN texte dépendant de
-    // l'horloge n'est généré côté client (la réécriture relative v4/v5
-    // dérivait entre deux déploiements — retirée en v6).
+    // Filtres v6.2 : recherche + catégorie (groupe exclusif, aria-pressed)
+    // + thèmes activés par les PASTILLES des cartes ET par la sélection
+    // "Thèmes" du panneau — les deux basculent dans le MÊME Set
+    // "activeTopics" (intersection AND, source de vérité unique) + tri JS
+    // (replace les <article> dans le DOM). La visibilité des cartes est
+    // pilotée par la classe utilitaire "hidden" (display:none). Enrichis-
+    // sement progressif : sans JS, cartes/liens/dépliants Branches restent
+    // pleinement utilisables ; les pastilles sont des BOUTONS INERTES
+    // (métadonnée de thèmes visible, sans filtrage) et la sélection
+    // "Thèmes" est un contrôle inerte ; l'ordre de construction (rang de
+    // catégorie puis nom complet A→Z, spec v6.2 item 6) s'applique.
+    // Les dates sont absolues au build (date FR + heure Europe/Paris) :
+    // AUCUN texte dépendant de l'horloge n'est généré côté client (la
+    // réécriture relative v4/v5 dérivait entre deux déploiements —
+    // retirée en v6).
     const grid = document.getElementById('grid');
     const cards = [...grid.querySelectorAll('article')];
     const originalOrder = [...cards];      // ordre de construction (reset du tri)
@@ -935,6 +1108,7 @@ def _render_index(cards, generated_at):
     const countEl = document.getElementById('result-count');
     const emptyEl = document.getElementById('empty');
     const sortSel = document.getElementById('f-sort');
+    const topicSel = document.getElementById('f-topic');
     const afWrap = document.getElementById('active-filters');
     const afChips = document.getElementById('active-filters-chips');
     const total = cards.length;
@@ -1044,8 +1218,21 @@ def _render_index(cards, generated_at):
         cat === "all" && !q && activeTopics.size === 0);
     }
 
+    // Le select "Thèmes" est une UI mono-sélection sur le Set multi
+    // activeTopics : il reflète sa PROPRE dernière sélection (l'option
+    // du thème actif reste affichée comme sélectionnée) et se
+    // réinitialise dès que ce thème quitte le Set — puce × retirée,
+    // pastille décochée ou réinitialisation (spec v6.2 item 5 : pills +
+    // select + chips = un seul état).
+    function syncTopicSelect() {
+      if (topicSel.value && !activeTopics.has(topicSel.value)) {
+        topicSel.value = "";
+      }
+    }
+
     function update() {
       syncPills();
+      syncTopicSelect();
       renderActiveFilters();
       applyFilters();
     }
@@ -1063,6 +1250,20 @@ def _render_index(cards, generated_at):
       applyFilters();
     });
     sortSel.addEventListener("change", applySort);
+    // Sélection "Thèmes" : bascule le thème dans le MÊME Set que les
+    // pastilles (sémantique AND inchangée, spec v6.2 item 5). Choisir un
+    // thème inactif l'ajoute (son option reste sélectionnée) ; le
+    // re-sélectionner depuis la liste le retire (syncTopicSelect remet
+    // alors le placeholder). Les thèmes activés via les pastilles
+    // s'ajoutent au Set sans passer par le select, qui ne peut en
+    // afficher qu'un.
+    topicSel.addEventListener("change", () => {
+      const t = topicSel.value;
+      if (!t) return;
+      if (activeTopics.has(t)) activeTopics.delete(t);
+      else activeTopics.add(t);
+      update();
+    });
     // Pastille de carte = bascule du thème dans le filtre actif
     // (mêmes sémantiques d'intersection que les puces × qui retirent
     // du même Set — source de vérité unique).
@@ -1093,7 +1294,7 @@ def _render_index(cards, generated_at):
   </script>
 </body>
 </html>
-""" % ("\n          ".join(chip_btns), count, count, grid,
+ """ % ("\n          ".join(chip_btns), topic_opts, count, count, grid,
         _gen_date_fr(generated_at), count)
 
 
@@ -1140,7 +1341,7 @@ def main():
             "status": _status_of(r),
             "ipynb": "fmt-ipynb" in (r.get("topics") or []),
             "pushed_at": r.get("pushed_at"),
-            "updated": _abs_date_fr(r.get("pushed_at")),
+            "updated": _abs_datetime_fr(r.get("pushed_at")),
             "github_url": r.get("html_url")
                           or "https://github.com/%s/%s" % (ORG, r["name"]),
         })
@@ -1156,9 +1357,13 @@ def main():
     print("Branches/tags: %d repos in %.1fs" %
           (len(cards), time.time() - extras_started))
 
-    # Group by category (Lecture, Notebook, Samples), then alphabetical.
-    order = {a: i for i, a in enumerate(CATEGORIES)}
-    cards.sort(key=lambda c: (order[c["category"]], c["name"]))
+    # Deterministic default order (spec v6.2 item 6): full-taxonomy
+    # category rank, then repo full name A->Z (lowercased key matching
+    # data-title; raw name as tie-breaker). The JS "Défaut" option and the
+    # originalOrder snapshot reuse this DOM order as-is.
+    cards.sort(key=lambda c: (
+        CATEGORY_RANK.get(c["category"], CATEGORY_RANK["none"]),
+        c["name"].lower(), c["name"]))
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
