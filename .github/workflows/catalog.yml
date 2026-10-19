@@ -4,12 +4,7 @@ on:
     branches: [main]
   schedule:
     - cron: '0 */6 * * *'
-  workflow_dispatch:
-    inputs:
-      preview_branch:
-        description: "If set, deploy a PREVIEW for this branch (empty = production, as today)"
-        required: false
-        default: ""
+  workflow_dispatch: {}
 permissions:
   contents: read
 jobs:
@@ -31,7 +26,6 @@ jobs:
       - name: Generate catalog
         env:
           GITHUB_TOKEN: ${{ secrets.EBPRO_CI_PAT || secrets.GITHUB_TOKEN }}
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: python catalog.py
       # Purged Tailwind v3 CSS (no runtime CDN): scans catalog.py for class
       # literals per tailwind.config.js, emits public/app.css (~15 s npx).

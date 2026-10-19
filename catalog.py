@@ -23,7 +23,9 @@ self-contained static card grid of the teaching surface under ``./public/``:
     ``_abs_datetime_fr`` (correct without JS, kept in the ``title``),
     which the load-time JS rewrites to "il y a X" recomputed per view
     (the v6 removal targeted BUILD-time-baked relative text drifting
-    between cron runs - recomputation at load cannot drift). BODY: topic
+    between cron runs - recomputation at load cannot drift); a tap on the
+    non-link date slot toggles relative <-> absolute via the baked
+    ``data-abs`` string (v8.2 touch fallback). BODY: topic
     pastilles - the repo's REAL non-system GitHub topics (see
     ``_display_topics``), sorted alphabetically, as filter TOGGLE
     buttons (``data-topic`` + ``aria-pressed``; unchanged from v7).
@@ -31,14 +33,18 @@ self-contained static card grid of the teaching surface under ``./public/``:
     subdued text-link + chevron (``.dd-link``, 44px), each branch row
     carrying its own per-branch content date (same data-commit
     pattern); a 1fr/1fr action grid of 44px buttons - ``Stable``
-    (``.btn-primary`` solid accent, only when the repo has a ``v*`` tag)
+    (``.btn-primary`` solid accent, only when the repo has a ``v*`` tag
+    whose ``releases/`` render is confirmed live at build time; an
+    inert grey placeholder when the tag exists, the render is not live,
+    and ``develop`` is - v8.2)
     BEFORE ``Latest`` (``.btn`` outline, ONLY when the repo has a
     ``develop`` branch - v8.1 ruling: Latest is strictly the develop
     tip, no default-branch fallback; the button is omitted when the
     branch is absent, and a lone remaining button spans the full width);
     content dates live ONLY in the button
-    tooltips (Latest rewritten to the relative form at load via
-    ``data-tip-*``), never inside the labels; then the conditional
+    tooltips (absolute French dates baked at build time - v8.2
+    ratified spec, no load-time tooltip rewrite), never inside the
+    labels; then the conditional
     ``nouveau depuis la stable`` (Latest tip newer than the stable tag
     commit) / ``build en attente`` (content date postdates catalog
     generation) chips - zero noise otherwise. The pastel category tint
@@ -79,10 +85,13 @@ self-contained static card grid of the teaching surface under ``./public/``:
 Branch/tag/content-date data is fetched per displayed repo (2 base REST
 calls + one commits call per dated ref: Latest ref (``develop``, only when
 the repo has that branch - v8.1), stable tag, at most 12
-disclosed branches; ThreadPool(8), global 5 calls/s pacing); a failed date
-falls back silently to the repo pushed_at (see _render_card). Site URLs are NOT
-probed at build time; a stale link is acceptable (see the stable-pointer
-note in _render_card).
+disclosed branches; ThreadPool(8), global 5 calls/s pacing); a failed
+date degrades to the repo pushed_at with a WARN (see _render_card). The
+``releases/`` site family IS probed at build time (v8.2): one plain GET
+per tagged repo (deduped by repo) against the publish host - the host
+catch-all answers HTTP 200 for every path, so liveness keys on the body
+signature (> 24 KB or a Quarto generator marker), never on the status
+code; any probe failure means "not live" (see _releases_live).
 
 Styling is a purged Tailwind v3 stylesheet built AT CI BUILD TIME from
 ``inputs.css`` + ``tailwind.config.js`` (content = this file) into
@@ -131,8 +140,12 @@ API = "https://api.github.com"
 OUT_DIR = "public"
 USER_AGENT = "ebpro-teaching-catalog"
 
-# Base under which the rendered course sites are published (deploy-static job
-# of the shared Quarto render pipeline). No build-time probing (see docstring).
+# Base under which the rendered course sites are published (deploy-static
+# job of the shared Quarto render pipeline). Real families (v8.2):
+# ``<repo>/<default-branch>/`` (e.g. develop), ``<repo>/previews/<slug>/``
+# (non-default branches, ephemeral - purged with the branch) and
+# ``<repo>/releases/<tag>/`` (tags). ``stable/`` does NOT exist; the
+# releases/ family is liveness-probed at build time (see _releases_live).
 SITE_BASE = "https://bruno.univ-tln.fr/teaching-material"
 
 # --- teaching surface (name-prefix classification, user spec v3) -----------
@@ -348,18 +361,13 @@ def _check_rate_limit(headers):
             time.sleep(wait)
 
 
-def _request(url, none_on=(), attempts=_MAX_ATTEMPTS):
+def _request(url, attempts=_MAX_ATTEMPTS):
     """GET ``url`` and return the parsed JSON body.
 
     Retries with exponential backoff on transient failures (HTTP 403/429 rate
     limit, or a network-level blip such as a DNS/connection error), up to
     ``attempts`` total attempts, then raises RuntimeError (non-zero exit).
     Non-retryable HTTP errors fail immediately.
-
-    If an HTTP status code is in ``none_on``, that response is treated as a
-    benign "absent" state and None is returned instead of raising. Used for:
-      - 409 on the commits endpoint ("Git Repository is empty")
-      - 404 on the compare endpoint (no common ancestor / branch gone)
     """
     _pace()
     global _call_count
@@ -397,8 +405,6 @@ def _request(url, none_on=(), attempts=_MAX_ATTEMPTS):
                 time.sleep(wait)
                 last_err = e
                 continue
-            if e.code in none_on:
-                return None
             body = ""
             try:
                 body = e.read().decode("utf-8", "replace")
@@ -422,16 +428,13 @@ def _request(url, none_on=(), attempts=_MAX_ATTEMPTS):
 
 
 
-# --- Cloudflare Pages API layer (best-effort; never raises) ---------------
+# --- Cloudflare Pages API layer (cleanup subcommand only; never raises) ---
 #
-# Used only when CF_API_TOKEN is set (i.e. in CI). Locally the token is empty
-# and no CF calls are made (branch rows fall back to GitHub links). Every CF
-# failure is swallowed -> cf_deployments = {} so a Cloudflare problem can
-# never break the (GitHub-backed) catalog.
-#
-# Inverted approach: list all CF Pages projects ONCE (1-2 paginated calls),
-# then fetch deployments only for the projects that match our catalog repos.
-# Total CF API calls: ~26 instead of 87 (56 of which were 404s).
+# Reached only through ``catalog.py cleanup``
+# (.github/workflows/cleanup.yml), and only when CF_API_TOKEN is set;
+# the catalog rendering path never touches CF. Locally the token is
+# empty and no CF calls are made. Every CF failure is swallowed so a
+# Cloudflare problem can never break the (GitHub-backed) cleanup run.
 
 CF_TOKEN = ""
 CF_API = "https://api.cloudflare.com/client/v4"
@@ -439,8 +442,6 @@ _cf_call_count = 0
 _cf_account_id = None
 _cf_account_fetched = False
 _cf_accounts_status = None
-_cf_projects_listed = 0
-_cf_deployments_fetched = 0
 _cf_other_logged = False
 
 
@@ -539,104 +540,6 @@ def cf_account_id():
     return _cf_account_id
 
 
-def cf_list_all_projects():
-    """List ALL Cloudflare Pages projects in the account (paginated).
-
-    Returns ``{project_name: {"subdomain": str, "production_branch": str}}``.
-    Uses 1-2 API calls (50 projects per page). On any failure returns ``{}``.
-    """
-    global _cf_projects_listed
-    acct = cf_account_id()
-    if not acct:
-        return {}
-    projects = {}
-    cursor = None
-    while True:
-        url = "%s/accounts/%s/pages/projects?per_page=50" % (CF_API, acct)
-        if cursor:
-            url += "&cursor=%s" % cursor
-        data, status = _cf_get(url)
-        if not (isinstance(data, dict) and data.get("success")
-                and isinstance(data.get("result"), list)):
-            if status != 200:
-                sys.stderr.write(
-                    "CF: /pages/projects -> HTTP %s (stopping pagination)\n"
-                    % status)
-            break
-        for p in data["result"]:
-            name = p.get("name", "")
-            if name:
-                projects[name] = {
-                    "subdomain": p.get("subdomain") or name,
-                    "production_branch": p.get("production_branch") or "main",
-                }
-        info = data.get("result_info") or {}
-        if info.get("cursor"):
-            cursor = info["cursor"]
-        else:
-            break
-    _cf_projects_listed = len(projects)
-    sys.stderr.write("CF: listed %d projects\n" % len(projects))
-    return projects
-
-
-def cf_get_deployments(project_name, per_page=20):
-    """Map of ``{branch: deployment}`` for a single CF Pages project.
-
-    For each branch (both ``preview`` and ``production`` environments) keeps
-    the most recent (max ``created_on``) deployment, capturing the fields
-    needed to render the same info the CF Pages dashboard shows:
-
-        url, branch, environment, status, sha, commit_message, created_on
-
-    Uses 1 API call. On any failure returns ``{}``.
-    """
-    global _cf_deployments_fetched
-    acct = cf_account_id()
-    if not acct:
-        return {}
-    # per_page must be <= 20 for this endpoint: per_page=100 is rejected with
-    # HTTP 400 / error 8000024. 20 is the documented default and is ample for
-    # the latest deployment per branch.
-    url = "%s/accounts/%s/pages/projects/%s/deployments?per_page=%d" % (
-        CF_API, acct, project_name, per_page)
-    data, status = _cf_get(url)
-    if not (isinstance(data, dict) and data.get("success")
-            and isinstance(data.get("result"), list)):
-        if status != 200:
-            sys.stderr.write(
-                "CF: /pages/projects/%s/deployments -> HTTP %s\n"
-                % (project_name, status))
-        return {}
-    _cf_deployments_fetched += 1
-    latest = {}
-    for d in data["result"]:
-        branch = d.get("branch") or ""
-        du = d.get("url")
-        created = d.get("created_on", "")
-        if not du:
-            continue
-        summary = d.get("summary") or {}
-        git_info = summary.get("git_info") or {}
-        env = d.get("environment") or ""
-        dep = {
-            "url": du,
-            "branch": branch,
-            "environment": env,
-            # Top-level status ("uploaded"/"in_progress"/"complete"/"error");
-            # fall back to the summary status if the top-level one is absent.
-            "status": d.get("status") or summary.get("status"),
-            "sha": git_info.get("sha") or "",
-            "commit_message": git_info.get("commit_message") or "",
-            "created_on": created,
-        }
-        key = branch or env or "production"
-        cur = latest.get(key)
-        if cur is None or created > cur["created_on"]:
-            latest[key] = dep
-    return latest
-
-
 # --- REST bulk fetch --------------------------------------------------------
 
 
@@ -681,7 +584,7 @@ def _latest_vtag(tags):
 # full, but per-branch dates cost one extra commits call each (the
 # branches API carries no dates), so they are fetched for at most the
 # first MAX_DATED_BRANCHES disclosed branches. Any date fetch failure
-# degrades silently to the repo pushed_at.
+# degrades to the repo pushed_at (a WARN is logged per failed ref).
 MAX_DATED_BRANCHES = 12
 
 
@@ -770,6 +673,62 @@ def fetch_extras(entries, workers=8):
     return dict(zip([e[0] for e in entries], results))
 
 
+# --- releases/ liveness probe (v8.2) ----------------------------------------
+
+# The publish host answers HTTP 200 with a ~23 KB fallback page for ANY
+# path (DokuWiki catch-all), so a 200 is never evidence of a published
+# render. Live signature: body larger than this byte floor OR carrying
+# the Quarto generator marker (genuine rendered pages always do, the
+# fallback page never does).
+RELEASES_LIVE_MIN_BYTES = 24576
+RELEASES_LIVE_MARKER = b'content="quarto-'
+
+
+def _releases_live(url):
+    """True when ``url`` serves a genuine rendered site (not the catch-all).
+
+    One plain public HTTP GET (no auth, no GitHub pacing): live iff the
+    body exceeds ``RELEASES_LIVE_MIN_BYTES`` or contains
+    ``RELEASES_LIVE_MARKER``. ANY failure (timeout, HTTP error, DNS,
+    unreadable) returns False - "not live" - and never raises, so the
+    probe can only ever demote a link to the honest disabled placeholder,
+    never break the build.
+    """
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = resp.read(RELEASES_LIVE_MIN_BYTES + 4096)
+    except Exception:  # noqa: BLE001 - probe degrades to "not live"
+        return False
+    if len(body) > RELEASES_LIVE_MIN_BYTES:
+        return True
+    return RELEASES_LIVE_MARKER in body
+
+
+def probe_releases(cards, workers=8):
+    """Set ``c["releases_live"]`` for every card (one probe per tagged repo).
+
+    Deduped by repo (a card has a single candidate ``releases/<tag>/``
+    URL); untagged cards get False with no call. Returns
+    ``(candidates, live)`` for the build log.
+    """
+    candidates = {
+        c["name"]: "%s/%s/releases/%s/" % (SITE_BASE, c["name"],
+                                           c["latest_vtag"])
+        for c in cards if c.get("latest_vtag")
+    }
+    live = set()
+    if candidates:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for name, ok in zip(candidates, pool.map(
+                    _releases_live, candidates.values())):
+                if ok:
+                    live.add(name)
+    for c in cards:
+        c["releases_live"] = c["name"] in live
+    return len(candidates), len(live)
+
+
 # --- classification helpers --------------------------------------------------
 
 
@@ -845,6 +804,24 @@ def _abs_datetime_fr(iso):
         local.strftime("%H:%M"))
 
 
+def _abs_date_fr(iso):
+    """``2026-10-17T12:32:00Z`` -> ``17 oct. 2026`` (build-time, date only).
+
+    v8.2 ratified spec: the Stable/Latest button tooltips carry the
+    ABSOLUTE French content DATE (no time-of-day, no load-time relative
+    rewrite). Same Europe/Paris conversion and honest fixed-offset
+    fallback as ``_abs_datetime_fr``.
+    """
+    try:
+        dt = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+    dt = dt.replace(tzinfo=timezone.utc)
+    local = dt.astimezone(
+        _PARIS_TZ if _PARIS_TZ is not None else timezone(timedelta(hours=1)))
+    return "%d %s %d" % (local.day, MONTHS_FR[local.month - 1], local.year)
+
+
 def _gen_date_fr(iso_utc):
     """``2026-10-14T10:00:00Z`` -> ``14/10/2026 à 12:00`` (local-free, UTC)."""
     try:
@@ -878,17 +855,19 @@ def _date_span(iso, cls):
     kept in the ``title`` tooltip), the raw UTC ISO travels in
     ``datetime`` AND ``data-commit`` - the load-time JS rewrites the
     text to "il y a X" RE-COMPUTED from that ISO on every view, so it
-    can never drift between cron builds (ruling 1). "" when the date is
-    unusable.
+    can never drift between cron builds (ruling 1). The same absolute
+    string is embedded in ``data-abs`` so a tap on the (non-link) date
+    slot can toggle relative <-> absolute without any fetch (v8.2 touch
+    fallback). "" when the date is unusable.
     """
     abs_dt = _abs_datetime_fr(iso)
     if not abs_dt:
         return ""
     esc_iso = html.escape(iso, quote=True)
     esc = html.escape(abs_dt)
-    return ('<time class="%s" datetime="%s" data-commit="%s" '
+    return ('<time class="%s" datetime="%s" data-commit="%s" data-abs="%s" '
             'title="Contenu du %s">%s</time>'
-            % (cls, esc_iso, esc_iso, esc, esc))
+            % (cls, esc_iso, esc_iso, esc, esc, esc))
 
 
 def _render_card(c, generated_at):
@@ -899,8 +878,11 @@ def _render_card(c, generated_at):
     Four zones:
 
       HEADER: the human description as the primary semibold line (links
-        to the site: ``stable/`` when the repo has a v* tag, ``develop/``
-        otherwise; with no description the repo name becomes the primary
+        to the site: ``releases/<tag>/`` when the repo has a v* tag whose
+        releases render is build-time-confirmed live, ``develop/`` when
+        the repo has a develop branch, the GitHub page otherwise (v8.2
+        real deploy-URL families - ``stable/`` does not exist); with no
+        description the repo name becomes the primary
         line) + the repo slug as a small monospace (12px) secondary line
         linking GitHub (that name link is the single source affordance -
         no separate Source slot since v6.2).
@@ -918,16 +900,20 @@ def _render_card(c, generated_at):
         own per-branch content date; a 1fr/1fr grid (``grid-cols-2``) of
         44px action buttons (ruling 2: ``.btn`` keeps the ``min-h-11``
         tap-target size) - ``Stable`` (``.btn-primary`` solid accent,
-        BEFORE ``Latest``) rendered ONLY when the repo has a v* tag and
-        ``Latest`` rendered ONLY when the repo has a develop branch
-        (v8.1 user ruling: Latest is strictly the develop tip; no
-        develop -> no Latest button, mirroring no-tag -> no-Stable).
+        BEFORE ``Latest``) linking ``releases/<tag>/`` ONLY when the repo
+        has a v* tag whose releases render is confirmed live at build
+        time; an inert grey disabled placeholder (no href) when the tag
+        exists, the render is not live, and develop is; NO Stable
+        affordance when the render is not live and there is no develop
+        branch. ``Latest`` rendered ONLY when the repo has a develop
+        branch (v8.1 user ruling: Latest is strictly the develop tip).
         Exactly one button spans the full width (``grid-cols-1``); no
-        button at all -> no action row (the Branches disclosure stays).
-        Content dates live ONLY in the button tooltips, never inside the
-        labels
-        (the Latest tooltip is rewritten to the relative form at load
-        via ``data-tip-prefix``/``data-tip-date``). Then the conditional
+        button at all -> no action row, and with no disclosed branch
+        either the whole footer is omitted (v8.2: no dangling hairline
+        on footer-less cards). Content dates live ONLY in the button
+        tooltips, never inside the labels, as ABSOLUTE French dates
+        baked at build time (v8.2 ratified spec - the load-time
+        ``data-tip-date`` rewrite is gone). Then the conditional
         chips: "nouveau depuis la stable" (Latest tip strictly newer
         than the stable tag commit, both dates fetched - never inferred)
         and "build en attente" (displayed content date postdates catalog
@@ -980,8 +966,17 @@ def _render_card(c, generated_at):
     ]
 
     # --- HEADER: description (primary) + repo slug (mono secondary) -----
-    primary_url = "%s/%s/%s/" % (
-        SITE_BASE, c["name"], "stable" if c["latest_vtag"] else "develop")
+    # v8.2 real deploy-URL families: releases/<tag>/ (only when the
+    # probe confirmed the render live) > develop/ (only when the repo
+    # HAS a develop branch) > the GitHub page. "stable/" never exists.
+    releases_live = bool(c.get("releases_live"))
+    if c["latest_vtag"] and releases_live:
+        primary_url = "%s/%s/releases/%s/" % (
+            SITE_BASE, c["name"], c["latest_vtag"])
+    elif latest_ref:
+        primary_url = "%s/%s/develop/" % (SITE_BASE, c["name"])
+    else:
+        primary_url = c["github_url"]
     if esc_desc:
         parts.append(
             '<a href="%s" target="_blank" rel="noopener" '
@@ -1015,7 +1010,7 @@ def _render_card(c, generated_at):
     pills = card_topics
     if pills:
         parts.append(
-            '<div class="mt-3 flex flex-wrap gap-1">%s</div>'
+            '<div class="mt-3 flex flex-wrap gap-1.5">%s</div>'
             % "".join(
                 '<button type="button" class="chip chip-topic" '
                 'data-topic="%s" aria-pressed="false" '
@@ -1025,7 +1020,11 @@ def _render_card(c, generated_at):
                 for t in pills))
 
     # --- FOOTER (mt-auto, hairline border-top, no fill) ------------------
-    foot = ['<footer class="mt-auto border-t border-slate-200 pt-3">']
+    # v8.2: footer CHILDREN only - the <footer> wrapper (with its
+    # border-t hairline) is emitted only when at least one child exists,
+    # so a card with no branches, no actions and no chips has no footer
+    # at all (no dangling hairline - HelloGit-class cards).
+    foot = []
     # Branches: native <details> disclosure as a full-width subdued
     # text-link + chevron (.dd-link, NOT a button-class element); every
     # row shows its own per-branch content date (absolute visible +
@@ -1036,6 +1035,7 @@ def _render_card(c, generated_at):
             '<li><a class="flex min-h-11 items-center gap-3 '
             'whitespace-nowrap px-3 py-3 font-mono text-[13px] '
             'text-slate-700 hover:bg-slate-100 hover:text-indigo-700" '
+            'title="rendu éphémère — supprimé avec la branche" '
             'href="%s/%s/previews/%s/" target="_blank" rel="noopener">'
             '<span>%s</span>%s</a></li>'
             % (SITE_BASE, c["name"],
@@ -1044,43 +1044,48 @@ def _render_card(c, generated_at):
                           "ml-auto shrink-0 text-[13px] text-slate-600"))
             for b in c["branches"])
         foot.append(
-            '<details class="dd dd-full"><summary class="dd-link chev" '
-            'aria-expanded="false">Branches</summary>'
+            '<details class="dd dd-full"><summary class="dd-link chev">'
+            'Branches</summary>'
             '<ul class="dd-list max-h-64 overflow-y-auto py-1">%s</ul>'
             '</details>' % items)
-    # Action grid: Stable (solid primary, BEFORE Latest) only when the
-    # repo has a v* tag; Latest only when the repo has a develop branch
-    # (v8.1). One button -> grid-cols-1 (full width), two -> grid-cols-2,
-    # none -> no action row. Dates live ONLY in the tooltips.
+    # Action grid (v8.2 releases gate): Stable (solid primary, BEFORE
+    # Latest) links releases/<tag>/ ONLY when the repo has a v* tag
+    # whose releases render is probe-confirmed live; grey disabled
+    # placeholder (no href) when the tag exists, the render is not live,
+    # and develop is; NO Stable affordance when not live and no develop
+    # branch. Latest only when the repo has a develop branch (v8.1). One
+    # button -> grid-cols-1 (full width), two -> grid-cols-2, none -> no
+    # action row. Dates live ONLY in the tooltips (absolute, v8.2).
     btns = []
     if c["latest_vtag"]:
-        stable_abs = _abs_datetime_fr(stable_iso)
-        btns.append(
-            '<a class="btn btn-primary" title="%s" '
-            'href="%s/%s/stable/" target="_blank" rel="noopener">'
-            'Stable</a>'
-            % (html.escape(
-                "Stable · contenu du %s (%s)"
-                % (stable_abs or "date inconnue", c["latest_vtag"]),
-                quote=True), SITE_BASE, c["name"]))
+        stable_abs = _abs_date_fr(stable_iso)
+        if releases_live:
+            btns.append(
+                '<a class="btn btn-primary" title="%s" '
+                'href="%s/%s/releases/%s/" target="_blank" '
+                'rel="noopener">Stable</a>'
+                % (html.escape(
+                    "Stable · contenu du %s (%s)"
+                    % (stable_abs or "date inconnue", c["latest_vtag"]),
+                    quote=True), SITE_BASE, c["name"], c["latest_vtag"]))
+        elif latest_ref:
+            # Tag exists but no live releases/ render: honest disabled
+            # placeholder - grey, no href, never a fake-200 link.
+            btns.append(
+                '<button type="button" class="btn btn-disabled" disabled '
+                'title="version stable pas encore publiée">Stable</button>')
     # Latest (.btn outline): ONLY when the repo has a develop branch
     # (v8.1 user ruling — Latest is strictly the develop tip; no
-    # develop -> no button, mirroring the no-tag -> no-Stable pattern).
-    # The relative tooltip form ("Latest · <ref>, il y a X") cannot be
-    # baked static: the JS rewrites title from data-tip-date at load.
+    # develop -> no button). v8.2 ratified spec: the tooltip is the
+    # ABSOLUTE French date baked at build time, same grammar as Stable
+    # ("Latest · develop, contenu du 19 oct. 2026") - no data-tip-*
+    # attributes, no load-time rewrite.
     if latest_ref:
-        latest_abs = _abs_datetime_fr(latest_iso)
-        tip_attrs = ""
-        if latest_abs:
-            tip_attrs = (' data-tip-prefix="%s, " data-tip-date="%s"'
-                         % (html.escape("Latest · " + latest_ref,
-                                        quote=True),
-                            html.escape(latest_iso, quote=True)))
+        latest_abs = _abs_date_fr(latest_iso)
         btns.append(
-            '<a class="btn"%s title="%s" href="%s/%s/develop/" '
+            '<a class="btn" title="%s" href="%s/%s/develop/" '
             'target="_blank" rel="noopener">Latest</a>'
-            % (tip_attrs,
-               html.escape("Latest · %s, contenu du %s"
+            % (html.escape("Latest · %s, contenu du %s"
                            % (latest_ref, latest_abs or "date inconnue"),
                            quote=True),
                SITE_BASE, c["name"]))
@@ -1096,8 +1101,8 @@ def _render_card(c, generated_at):
     if latest_raw and stable_raw and latest_raw > stable_raw:
         chips += ('<span class="chip chip-new" title="%s">nouveau depuis '
                   'la stable</span>'
-                  % html.escape("contenu %s plus récent que la stable %s"
-                                % (latest_ref, c["latest_vtag"]),
+                  % html.escape("la version la plus récente est "
+                                "postérieure à la version stable",
                                 quote=True))
     if latest_iso and generated_at and latest_iso > generated_at:
         chips += ('<span class="chip chip-pending" title="%s">build en '
@@ -1109,8 +1114,10 @@ def _render_card(c, generated_at):
         foot.append(
             '<div class="mt-2 flex flex-wrap items-center gap-2">%s</div>'
             % chips)
-    foot.append("</footer>")
-    parts.extend(foot)
+    if foot:
+        parts.append(
+            '<footer class="mt-auto border-t border-slate-200 pt-3">'
+            + "".join(foot) + "</footer>")
     parts.append("</article>")
     return "\n      ".join(parts)
 
@@ -1354,13 +1361,6 @@ def _render_index(cards, generated_at):
     let formation = "";
     let filiere = "";
 
-    // <details>/<summary> : aria-expanded synchronisé sur l'état natif.
-    document.querySelectorAll('details').forEach(d => {
-      const s = d.querySelector('summary[aria-expanded]');
-      if (s) d.addEventListener("toggle", () =>
-        s.setAttribute("aria-expanded", String(d.open)));
-    });
-
     // Dates de contenu : "il y a X" recalculé à chaque vue depuis l'ISO
     // (ruling 1 — jamais périmé entre deux builds cron ; sans JS, l'absolu
     // visible reste exact).
@@ -1369,17 +1369,30 @@ def _render_index(cards, generated_at):
       if (s < 3600) return "il y a " + Math.max(1, Math.floor(s / 60)) + " min";
       const d = Math.floor(s / 86400);
       if (d < 1) return "il y a " + Math.floor(s / 3600) + " h";
-      if (d < 7) return "il y a " + d + " j";
-      if (d < 365) return "il y a " + Math.floor(d / 7) + " sem";
-      return d < 730 ? "il y a 1 an" : "il y a " + Math.floor(d / 365) + " ans";
+      if (d < 7) return "il y a " + d + (d > 1 ? " jours" : " jour");
+      if (d < 28) { const w = Math.floor(d / 7); return "il y a " + w + (w > 1 ? " semaines" : " semaine"); }
+      if (d < 365) return "il y a " + Math.max(1, Math.floor(d / 30)) + " mois";
+      const a = Math.floor(d / 365);
+      return "il y a " + a + (a > 1 ? " ans" : " an");
     }
     document.querySelectorAll('[data-commit]').forEach(el => {
       el.textContent = relFr(el.dataset.commit);
+      el.setAttribute("aria-label", el.textContent);
     });
-    // Infobulle "Latest" : la forme relative ne peut pas être statique,
-    // on la recalcule ici (préfixe porté par data-tip-prefix).
-    document.querySelectorAll('[data-tip-date]').forEach(el => {
-      el.title = el.dataset.tipPrefix + relFr(el.dataset.tipDate);
+    // Repli tactile (v8.2) : un tap sur le <time> (slot méta, hors lien)
+    // bascule relatif <-> absolu (data-abs embarqué au build) ; le
+    // re-tap restaure la forme relative. Les lignes de branche sont des
+    // liens : elles gardent le clic de navigation, pas de bascule.
+    document.querySelectorAll('time[data-abs]').forEach(el => {
+      if (el.closest("a")) return;
+      el.style.cursor = "pointer";
+      el.addEventListener("click", () => {
+        const pinned = el.dataset.pinned === "1";
+        el.dataset.pinned = pinned ? "" : "1";
+        const txt = pinned ? relFr(el.dataset.commit) : el.dataset.abs;
+        el.textContent = txt;
+        el.setAttribute("aria-label", txt);
+      });
     });
 
     // Filtre AND : catégorie x recherche x intersection des thèmes
@@ -1693,11 +1706,9 @@ def main():
             "default_branch": r.get("default_branch"),
             "private": bool(r.get("private")),
             "status": _status_of(r),
-            "ipynb": "fmt-ipynb" in (r.get("topics") or []),
             "formation": _axis_of(r.get("topics"), "formation-"),
             "filiere": _axis_of(r.get("topics"), "filiere-"),
             "pushed_at": r.get("pushed_at"),
-            "updated": _abs_datetime_fr(r.get("pushed_at")),
             "github_url": r.get("html_url")
                           or "https://github.com/%s/%s" % (ORG, r["name"]),
         })
@@ -1714,6 +1725,15 @@ def main():
         c["dates"] = dates
     print("Branches/tags/dates: %d repos in %.1fs" %
           (len(cards), time.time() - extras_started))
+
+    # v8.2 releases/ liveness gate: one plain public GET per tagged repo
+    # (deduped), keyed on the body signature - never the 200 status (the
+    # host catch-all). Dead/unknown probes demote the Stable link to the
+    # honest placeholder and the primary URL to develop/GitHub.
+    probe_started = time.time()
+    probed, live_n = probe_releases(cards)
+    print("Releases probe: %d candidates, %d live in %.1fs" %
+          (probed, live_n, time.time() - probe_started))
 
     # Deterministic default order (spec v6.2 item 6, refined v7 item 5):
     # full-taxonomy category rank, then the baked data-sortkey (lecture
@@ -1882,8 +1902,7 @@ def cmd_cleanup(args):
                 else:
                     print("  [ERR] %s / %s / %s: HTTP %s"
                           % (proj_name, branch, dep_id, status))
-            total_deleted += proj_deleted
-
+        total_deleted += proj_deleted
         if proj_deleted > 0:
             print("  %s: deleted %d" % (proj_name, proj_deleted))
 

@@ -56,9 +56,10 @@
   /* v8 card action-grid buttons: same 44px min-height as .lnk (ruling 2 —
      tap targets retained), .btn = secondary outline, .btn-primary = solid
      single accent (Stable, BEFORE Latest); used in the 1fr/1fr footer
-     grid. The v6 .lnk-primary / .lnk-disabled pair is gone: v8 omits the
-     Stable button entirely when the repo has no v* tag (no disabled
-     placeholder), so Latest spans the full width instead. */
+     grid. v8.2: .btn-disabled is the honest Stable placeholder (v* tag
+     exists, releases/ render not confirmed live, develop present) — grey,
+     no href, inert. No v* tag (or a dead render with no develop) -> no
+     Stable slot at all; a lone button spans the full width. */
   .btn {
     @apply inline-flex min-h-11 items-center justify-center rounded-md
       border border-slate-300 bg-white px-3 text-sm font-medium
@@ -68,6 +69,15 @@
   .btn-primary {
     @apply border-indigo-700 bg-indigo-700 text-white
       hover:border-indigo-800 hover:bg-indigo-800 hover:text-white;
+  }
+  /* v8.2 disabled action placeholder (unpublished Stable): deliberately
+     recessive (disabled controls are exempt from the text-contrast bar);
+     the message lives in the title tooltip. */
+  .btn-disabled {
+    @apply cursor-default border-slate-200 bg-slate-100 text-slate-500;
+  }
+  .btn-disabled:hover {
+    @apply border-slate-200 bg-slate-100 text-slate-500;
   }
 
   /* Category segmented control (aria-pressed marks the active one — the JS
@@ -140,6 +150,7 @@
      progressive enhancement, see the catalog.py docstring. */
   button.chip-topic {
     cursor: pointer;
+    @apply min-h-6; /* v8.2: 24px minimum target (pills row gap >= 6px) */
   }
   button.chip-topic:not(.chip-pill-active):hover {
     @apply border-indigo-700 text-indigo-700;
@@ -189,7 +200,7 @@
   }
   .dd-link {
     @apply flex min-h-11 w-full items-center justify-between bg-transparent
-      px-0 text-left text-sm font-medium text-slate-500
+      px-0 text-left text-sm font-medium text-slate-600
       transition-colors hover:text-indigo-700;
   }
 
