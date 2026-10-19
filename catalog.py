@@ -877,15 +877,18 @@ def _render_card(c, generated_at):
     hairline ``border-t`` (no fill), so footers align across the grid.
     Four zones:
 
-      HEADER: the human description as the primary semibold line (links
-        to the site: ``releases/<tag>/`` when the repo has a v* tag whose
-        releases render is build-time-confirmed live, ``develop/`` when
-        the repo has a develop branch, the GitHub page otherwise (v8.2
-        real deploy-URL families - ``stable/`` does not exist); with no
-        description the repo name becomes the primary
-        line) + the repo slug as a small monospace (12px) secondary line
-        linking GitHub (that name link is the single source affordance -
-        no separate Source slot since v6.2).
+      HEADER (v8.3 heading structure): the repo name as an ``<h2>``
+        semibold line (the page keeps its single ``<h1>``). With a
+        description the h2 links to GitHub (still the single source
+        affordance - no separate Source slot since v6.2) and the
+        description follows as a server-rendered one-line
+        ``<p class="text-sm">`` under the h2 linking to the site:
+        ``releases/<tag>/`` when the repo has a v* tag whose releases
+        render is build-time-confirmed live, ``develop/`` when the repo
+        has a develop branch, the GitHub page otherwise (v8.2 real
+        deploy-URL families - ``stable/`` does not exist). Without a
+        description the h2 itself links to that primary URL. Every
+        rendered string is html.escape'd.
       META ROW: category label CHIP (``CATEGORY_CHIP`` literals) + status
         pastille (tonal variant when one exists, ``chip-outline``
         otherwise) LEFT; the content date right-aligned in a FIXED
@@ -965,7 +968,7 @@ def _render_card(c, generated_at):
            CATEGORY_TINT.get(cat, CATEGORY_TINT["none"])),
     ]
 
-    # --- HEADER: description (primary) + repo slug (mono secondary) -----
+    # --- HEADER: h2 title + description line (v8.3); primary URL gate --
     # v8.2 real deploy-URL families: releases/<tag>/ (only when the
     # probe confirmed the render live) > develop/ (only when the repo
     # HAS a develop branch) > the GitHub page. "stable/" never exists.
@@ -977,23 +980,27 @@ def _render_card(c, generated_at):
         primary_url = "%s/%s/develop/" % (SITE_BASE, c["name"])
     else:
         primary_url = c["github_url"]
+    # v8.3 SEO heading structure: the repo name is an <h2> carrying the
+    # old primary-slot classes (text-base font-semibold - visual size
+    # unchanged; inputs.css has no selector on the old title <a>, the
+    # utilities are inline, so nothing to re-point). With a description
+    # the h2 keeps the GitHub affordance (the single source link since
+    # v6.2) and the description follows as a one-line <p class="text-sm">
+    # under the h2 linking to primary_url; without a description the h2
+    # links to primary_url (old else-branch behaviour). esc_desc is
+    # html.escape'd at the top of this function (escaping finding).
+    title_href = c["github_url"] if esc_desc else primary_url
+    parts.append(
+        '<h2 class="leading-snug"><a href="%s" target="_blank" '
+        'rel="noopener" class="block break-all text-base font-semibold '
+        'text-slate-900 hover:text-indigo-700 hover:underline">'
+        '%s</a></h2>' % (title_href, esc_name))
     if esc_desc:
         parts.append(
-            '<a href="%s" target="_blank" rel="noopener" '
-            'class="block text-base font-semibold leading-snug '
-            'text-slate-900 line-clamp-2 hover:text-indigo-700 '
-            'hover:underline">%s</a>' % (primary_url, esc_desc))
-        parts.append(
-            '<a href="%s" target="_blank" rel="noopener" '
-            'class="mt-1 block break-all font-mono text-xs %s '
-            'hover:text-indigo-700">%s</a>'
-            % (c["github_url"], meta_text, esc_name))
-    else:
-        parts.append(
-            '<a href="%s" target="_blank" rel="noopener" '
-            'class="block break-all text-base font-semibold '
-            'text-slate-900 hover:text-indigo-700 hover:underline">'
-            '%s</a>' % (primary_url, esc_name))
+            '<p class="mt-1 text-sm"><a href="%s" target="_blank" '
+            'rel="noopener" class="block leading-snug %s line-clamp-1 '
+            'hover:text-indigo-700 hover:underline">%s</a></p>'
+            % (primary_url, meta_text, esc_desc))
 
     # --- META ROW: taxonomy chips LEFT, content date RIGHT (fixed slot) --
     parts.append(
@@ -1225,6 +1232,21 @@ def _render_index(cards, generated_at):
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Supports pédagogiques · Emmanuel BRUNO</title>
+  <!-- v8.3 SEO: meta description / canonical / OpenGraph / Twitter card.
+       The canonical pins the trailing-slash directory URL (index.html vs
+       directory ambiguity disambiguated for crawlers; host-side redirect
+       is out of repo scope). Literal block - no format placeholders. -->
+  <meta name="description" content="Index des supports de cours Quarto de l'org ebpro : git, Java, Kotlin, développement web, conteneurs, CI/CD, etc.">
+  <link rel="canonical" href="https://bruno.univ-tln.fr/teaching-material/catalog/">
+  <meta property="og:title" content="Supports pédagogiques · Emmanuel BRUNO">
+  <meta property="og:description" content="Index des supports de cours Quarto de l'org ebpro : git, Java, Kotlin, développement web, conteneurs, CI/CD, etc.">
+  <meta property="og:url" content="https://bruno.univ-tln.fr/teaching-material/catalog/">
+  <meta property="og:site_name" content="Teaching ebpro">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="fr_FR">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Supports pédagogiques · Emmanuel BRUNO">
+  <meta name="twitter:description" content="Index des supports de cours Quarto de l'org ebpro : git, Java, Kotlin, développement web, conteneurs, CI/CD, etc.">
   <!-- Tailwind v3 purgé, généré au build CI (inputs.css -> public/app.css).
        Aucun CDN : la page est mise en page intégralement même si les
        requêtes tierces sont bloquées et sans FOUC.
