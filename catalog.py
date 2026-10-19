@@ -8,36 +8,40 @@ self-contained static card grid of the teaching surface under ``./public/``:
     ``lecture-`` -> Lecture, ``notebook-`` -> Notebook, ``sample-`` ->
     Samples (+ FORCED_SAMPLES names); archived repos, repos carrying the
     ``status-legacy`` topic and non-matching names are excluded entirely,
-  * card content (v6.2 sober mobile-first layout): the card surface is
-    tinted by category (pastel Tailwind literals baked from the
-    ``CATEGORY_TINT`` dict), and the meta row carries the category label
-    CHIP (``CATEGORY_CHIP`` literals) + status chip (colour-coded, dark
-    text on light tint). The human description is the primary line
-    (2-line clamp) and the repo name a small monospace secondary line
-    linking GitHub (that name link is the single "source" affordance —
-    the v6 Source footer slot was removed in v6.2). Topic pastilles are
-    the repo's REAL GitHub topics minus the system ones
-    (``SYSTEM_TOPIC_PREFIXES`` area-/status-/formation-/filiere- and
-    ``SYSTEM_TOPICS`` fmt-ipynb/review/github-actions/self-hosted —
-    labelling noise, not teaching subjects), sorted alphabetically and
-    rendered as filter
-    TOGGLE buttons. The uniform action row ALWAYS shows the 3 slots
-    ``Stable · Latest · Branches`` in that order: a missing target
-    renders as a disabled placeholder (unfocusable
-    ``<span class="lnk lnk-disabled" aria-disabled="true">`` with an
-    explanatory ``title``, same box size as the enabled slots), never a
-    hidden slot. Stable (solid accent) is enabled only when the repo has
-    a ``v*`` tag; Branches is the native <details> disclosure (enabled
-    only with >=1 non-default branch). Enabled slots keep the >=44px tap
-    targets; the Branches caret sits in a fixed reserved track so the
-    summary width never changes with the open/close rotation (no row
-    jitter). The date line is an ABSOLUTE French date WITH time
-    (``17 oct. 2026 14:32``, pushed_at converted UTC -> Europe/Paris via
-    stdlib ``zoneinfo``; fixed UTC+1 + "heure locale" label when tzdata
-    is unavailable) inside ``<time datetime>`` (full UTC ISO in the
-    datetime attribute and the title) — no clock-dependent JS text
-    anywhere (v6 removed the "il y a X" rewrite: it drifted between
-    builds, user complaint).
+  * card content (v8 ratified card anatomy): the card is a flex column
+    whose footer is pinned to the bottom (``mt-auto``) above a hairline
+    ``border-top``, so footers align across the grid. HEADER: the human
+    description as the primary semibold line (2-line clamp) + the repo
+    slug as a small monospace (12px) secondary line linking GitHub (the
+    name link stays the single source affordance - no separate Source
+    slot, v6.2). META ROW: category label CHIP (``CATEGORY_CHIP``
+    literals) + status pastille (tonal variant when one exists,
+    ``chip-outline`` otherwise) on the LEFT; the content date
+    right-aligned in a FIXED position on the RIGHT - a
+    ``<time data-commit>`` carrying the displayed branch tip ISO: the
+    visible text is the absolute French date+time built by
+    ``_abs_datetime_fr`` (correct without JS, kept in the ``title``),
+    which the load-time JS rewrites to "il y a X" recomputed per view
+    (the v6 removal targeted BUILD-time-baked relative text drifting
+    between cron runs - recomputation at load cannot drift). BODY: topic
+    pastilles - the repo's REAL non-system GitHub topics (see
+    ``_display_topics``), sorted alphabetically, as filter TOGGLE
+    buttons (``data-topic`` + ``aria-pressed``; unchanged from v7).
+    FOOTER: the ``Branches`` <details> disclosure as a full-width
+    subdued text-link + chevron (``.dd-link``, 44px), each branch row
+    carrying its own per-branch content date (same data-commit
+    pattern); a 1fr/1fr action grid of 44px buttons - ``Stable``
+    (``.btn-primary`` solid accent, only when the repo has a ``v*`` tag;
+    omitted otherwise and then ``Latest`` spans the full width) BEFORE
+    ``Latest`` (``.btn`` outline); content dates live ONLY in the button
+    tooltips (Latest rewritten to the relative form at load via
+    ``data-tip-*``), never inside the labels; then the conditional
+    ``nouveau depuis la stable`` (Latest tip newer than the stable tag
+    commit) / ``build en attente`` (content date postdates catalog
+    generation) chips - zero noise otherwise. The pastel category tint
+    (``CATEGORY_TINT``) and every v7 sort/filter data attribute
+    (``data-title``/``data-ts``/``data-catrank``/``data-formation``/
+    ``data-filiere``/``data-sortkey``) are unchanged.
   * filters: sticky slim header with live search; filter panel collapsed
     behind a "Filtres" toggle below lg, inline from lg up; category
     segmented control (aria-pressed), a "Thèmes…" select (options sorted
@@ -69,9 +73,10 @@ self-contained static card grid of the teaching surface under ``./public/``:
     name) stands without JS. Visibility via the Tailwind ``hidden`` utility
     (safe now that the daisyUI .card{display:flex} override is gone).
 
-Branch/tag data is fetched per displayed repo (2 REST calls each,
-ThreadPool(8)); a per-repo fetch failure degrades to a DISABLED placeholder
-slot (the action row stays uniform, see _render_card). Site URLs are NOT
+Branch/tag/content-date data is fetched per displayed repo (2 base REST
+calls + one commits call per dated ref: Latest ref, stable tag, at most 12
+disclosed branches; ThreadPool(8), global 5 calls/s pacing); a failed date
+falls back silently to the repo pushed_at (see _render_card). Site URLs are NOT
 probed at build time; a stale link is acceptable (see the stable-pointer
 note in _render_card).
 
@@ -98,6 +103,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -667,12 +673,46 @@ def _latest_vtag(tags):
     return max(names, key=_vtag_key)
 
 
-def _fetch_repo_extras(name, default_branch):
-    """Return ``(non-default branches, latest v* tag)`` for one repo.
+# Per-repo content-date budget: the disclosed branch list is fetched in
+# full, but per-branch dates cost one extra commits call each (the
+# branches API carries no dates), so they are fetched for at most the
+# first MAX_DATED_BRANCHES disclosed branches. Any date fetch failure
+# degrades silently to the repo pushed_at.
+MAX_DATED_BRANCHES = 12
 
-    2 REST calls (branches + tags, per_page=100, single page). Any failure
-    degrades to an empty result so the corresponding button is hidden rather
-    than breaking the build.
+
+def _commit_date(name, ref):
+    """Commit date (ISO) of the tip of ``ref`` (branch or tag name).
+
+    ``GET /repos/{org}/{repo}/commits?sha={ref}&per_page=1`` -> the
+    ``commit.committer.date`` of the tip commit (the branches list
+    endpoint carries no dates). None on any failure (gone ref, empty
+    repo, rate-limit give-up) so callers fall back to pushed_at.
+    """
+    try:
+        data = _request("%s/repos/%s/%s/commits?sha=%s&per_page=1" % (
+            API, ORG, name, urllib.parse.quote(ref, safe="")))
+    except Exception as e:  # noqa: BLE001 - degrade, never break the build
+        sys.stderr.write("WARN: commit-date fetch failed for %s@%s (%s)\n"
+                         % (name, ref, e))
+        return None
+    try:
+        return data[0]["commit"]["committer"]["date"]
+    except (TypeError, IndexError, KeyError):
+        return None
+
+
+def _fetch_repo_extras(name, default_branch):
+    """Return ``(branches, latest_vtag, dates)`` for one repo.
+
+    Base: 2 REST calls (branches + tags, per_page=100, single page), as
+    before. Content dates (v8 anatomy): one extra commits call each for
+    the Latest ref (``develop`` when the repo has one - the branch the
+    Latest button renders - else the default branch), the latest ``v*``
+    tag when present (the Stable content date), and at most
+    MAX_DATED_BRANCHES of the disclosed branches. ``dates``:
+    ``{"latest_ref", "latest", "stable", "branches": {name: iso}}`` with
+    None for every ref whose fetch failed (renderer falls back).
     """
     try:
         br = _request("%s/repos/%s/%s/branches?per_page=100" % (API, ORG, name))
@@ -687,18 +727,32 @@ def _fetch_repo_extras(name, default_branch):
     # Branches dropdown exclusions: the repo default branch, ``gh-pages``
     # (a render artefact, not a content branch) and the literal ``develop``
     # (safety: already the canonical Latest target, never a preview row).
+    raw = [b["name"] for b in (br or []) if b.get("name")]
     excluded = {default_branch, "gh-pages", "develop"}
-    branches = sorted(b["name"] for b in (br or [])
-                      if b.get("name") and b["name"] not in excluded)
-    return branches, _latest_vtag(tg or [])
+    branches = sorted(b for b in raw if b not in excluded)
+    latest_vtag = _latest_vtag(tg or [])
+    latest_ref = "develop" if "develop" in raw else (default_branch or "HEAD")
+    dates = {
+        "latest_ref": latest_ref,
+        "latest": _commit_date(name, latest_ref),
+        "stable": _commit_date(name, latest_vtag) if latest_vtag else None,
+        "branches": {},
+    }
+    for b in branches[:MAX_DATED_BRANCHES]:
+        d = _commit_date(name, b)
+        if d:
+            dates["branches"][b] = d
+    return branches, latest_vtag, dates
 
 
 def fetch_extras(entries, workers=8):
-    """Parallel per-repo branches+tags fetch.
+    """Parallel per-repo branches+tags+content-dates fetch.
 
     ``entries``: list of ``(repo name, default branch)``. Returns a dict
-    ``name -> (branches, latest_vtag)``. ~2 calls per repo at ~5 calls/s
-    global pacing -> well under the 4-minute build budget for ~60 repos.
+    ``name -> (branches, latest_vtag, dates)``. 2 base calls + up to
+    2 + MAX_DATED_BRANCHES commits calls per repo, all through the
+    global 5 calls/s pacing; for the ~60-repo teaching surface this
+    stays far under the 5000/hour primary rate limit (6h cron).
     """
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(
@@ -756,9 +810,12 @@ def _abs_datetime_fr(iso):
     When tzdata is unavailable (_PARIS_TZ None, bare CI/dev image) the
     conversion falls back to a fixed UTC+1 offset and the label
     ``heure locale`` is appended, so the page never asserts a precision it
-    does not have. Still fully ABSOLUTE: no clock-dependent JS text
-    anywhere (the v4/v5 "il y a X" rewrite drifted between builds and was
-    removed in v6). The full UTC ISO timestamp travels in the ``datetime``
+    does not have. v8: the load-time JS rewrites the visible text to
+    "il y a X" RE-COMPUTED from the embedded ISO (``data-commit``) on
+    every view - the v6 build-drift problem is structurally impossible
+    here (nothing relative is ever baked). The absolute string stays in
+    the ``title`` tooltip and remains the no-JS fallback. The full UTC
+    ISO timestamp travels in the ``datetime``
     /``title`` attributes of the rendered ``<time>`` element (machine
     readable, zone-explicit).
     """
@@ -795,7 +852,7 @@ def _status_chip(status, muted=False):
     """
     if not status:
         return ""
-    cls = "chip-muted" if muted else STATUS_CHIP.get(status, "chip-neutral")
+    cls = "chip-muted" if muted else STATUS_CHIP.get(status, "chip-outline")
     return ('<span class="chip %s">%s</span>'
             % (cls, html.escape(status)))
 
@@ -803,129 +860,140 @@ def _status_chip(status, muted=False):
 # --- rendering ---------------------------------------------------------------
 
 
-def _disabled_slot(label, title):
-    """Disabled action-slot placeholder (spec v6, uniform card row).
+def _date_span(iso, cls):
+    """Content-date element for the v8 anatomy (meta row + branch rows).
 
-    Rendered as an unfocusable ``<span>`` (NOT ``<button disabled>``:
-    disabled buttons drop out of the tab order but keep hover styling
-    traps; the span is inert by construction). Same box as ``.lnk``
-    (min-height 44px, border, padding) so the row stays visually
-    uniform; ``.lnk-disabled`` recolors to slate-500 on white (AA for
-    4.5:1 body text) and cancels the ``.lnk`` hover shift. ``title``
-    explains the absence (e.g. "Aucune branche").
+    Same pattern everywhere: the ABSOLUTE French date+time built by
+    ``_abs_datetime_fr`` is the visible text (correct with JS blocked,
+    kept in the ``title`` tooltip), the raw UTC ISO travels in
+    ``datetime`` AND ``data-commit`` - the load-time JS rewrites the
+    text to "il y a X" RE-COMPUTED from that ISO on every view, so it
+    can never drift between cron builds (ruling 1). "" when the date is
+    unusable.
     """
-    return ('<span class="lnk lnk-disabled" aria-disabled="true" '
-            'title="%s">%s</span>' % (html.escape(title, quote=True),
-                                      html.escape(label)))
+    abs_dt = _abs_datetime_fr(iso)
+    if not abs_dt:
+        return ""
+    esc_iso = html.escape(iso, quote=True)
+    esc = html.escape(abs_dt)
+    return ('<time class="%s" datetime="%s" data-commit="%s" '
+            'title="Contenu du %s">%s</time>'
+            % (cls, esc_iso, esc_iso, esc, esc))
 
 
-def _render_card(c):
-    """Return the <article> for one catalog entry ``c`` (v6.2 sober layout).
+def _render_card(c, generated_at):
+    """Return the <article> for one catalog entry ``c`` (v8 anatomy).
 
-    Hierarchy: the card ground is a pastel tint keyed to the category
-    (``CATEGORY_TINT`` literal classes, purge-safe); a meta row carries
-    the category label CHIP (``CATEGORY_CHIP`` literals) + status chip;
-    then the human description as the primary line (line-clamp-2, links
-    to the primary site path); the repo name as a small monospace
-    secondary line linking GitHub (this name link is the source
-    affordance — the v6 Source footer slot was removed in v6.2). Topics
-    are the non-system GitHub topics (see _display_topics), sorted
-    alphabetically, as neutral monospace filter TOGGLE buttons
-    (``data-topic`` + ``aria-pressed``; the JS toggles them into the
-    active topic set — progressive enhancement, INERT buttons without
-    JS). The footer is a UNIFORM 3-slot action row, always in the order
-    Stable · Latest · Branches (spec v6.2 item 2): an unavailable target
-    (no v* tag / no non-default branch) renders a disabled placeholder
-    slot instead of disappearing. Enabled slots are >=44px tap targets.
-    The Branches <summary> caret lives in a fixed reserved track so the
-    disclosure never changes row width (.chev::after, inputs.css). The
-    date line is an absolute French date WITH HH:MM time inside ``<time
-    datetime>`` (full UTC ISO in the datetime/title attributes, Europe/
-    Paris display, no JS clock text). ``data-title`` (lower-cased name),
-    ``data-ts`` (pushed_at ISO) and ``data-catrank`` (category rank int,
-    spec v6.2 item 6) on the <article> back the JS sort control.
+    The card is a flex column whose footer carries ``mt-auto`` above a
+    hairline ``border-t`` (no fill), so footers align across the grid.
+    Four zones:
+
+      HEADER: the human description as the primary semibold line (links
+        to the site: ``stable/`` when the repo has a v* tag, ``develop/``
+        otherwise; with no description the repo name becomes the primary
+        line) + the repo slug as a small monospace (12px) secondary line
+        linking GitHub (that name link is the single source affordance -
+        no separate Source slot since v6.2).
+      META ROW: category label CHIP (``CATEGORY_CHIP`` literals) + status
+        pastille (tonal variant when one exists, ``chip-outline``
+        otherwise) LEFT; the content date right-aligned in a FIXED
+        position (``ml-auto``) on the RIGHT - ``_date_span`` over the
+        displayed branch tip (``dates["latest"]``, fallback pushed_at).
+      BODY: topic pastilles - the repo's non-system topics
+        (``_display_topics``) as filter TOGGLE buttons (``data-topic`` +
+        ``aria-pressed``; unchanged from v7, progressive enhancement -
+        inert buttons without JS).
+      FOOTER: the Branches <details> disclosure as a full-width subdued
+        text-link + chevron (``.dd-link``, 44px), every row carrying its
+        own per-branch content date; a 1fr/1fr grid (``grid-cols-2``) of
+        44px action buttons (ruling 2: ``.btn`` keeps the ``min-h-11``
+        tap-target size) - ``Stable`` (``.btn-primary`` solid accent,
+        BEFORE ``Latest``) rendered ONLY when the repo has a v* tag, and
+        then ``Latest`` spans the full width (``grid-cols-1``). Content
+        dates live ONLY in the button tooltips, never inside the labels
+        (the Latest tooltip is rewritten to the relative form at load
+        via ``data-tip-prefix``/``data-tip-date``). Then the conditional
+        chips: "nouveau depuis la stable" (Latest tip strictly newer
+        than the stable tag commit, both dates fetched - never inferred)
+        and "build en attente" (displayed content date postdates catalog
+        generation). Zero chip noise when neither holds.
+
+    The pastel category tint (``CATEGORY_TINT``) and every v7 sort/filter
+    data attribute (``data-title``/``data-ts``/``data-catrank``/
+    ``data-formation``/``data-filiere``/``data-sortkey``) are unchanged.
     """
     cat = c["category"]
-    # Muted statuses (frozen/duplicate) are de-emphasised LOCALLY: a neutral
+    # Muted statuses (frozen/duplicate) are de-emphasised LOCALLY: a
     # chip-muted status pastille. No card-level transparency (the old 60%
-    # opacity washed the text below AA contrast, review P1-a). Footer links
-    # keep their normal AA colours.
+    # opacity washed the text below AA contrast, review P1-a).
     is_muted = c["status"] in STATUS_MUTED
-    # v6.2 AA audit (measured on the compiled palette): slate-500 lands at
-    # 4.26-4.46:1 on 6 of the 12 pastel card tints -- BELOW AA. The meta
-    # lines therefore use slate-600 on every card (>=6.7:1 on all tints);
-    # muted vs active stays differentiated by the status pastille
-    # (chip-muted vs status chip), not by washing the text. The old
-    # contract idea of "darkening the tint" is directionally wrong here:
-    # a darker ground lowers contrast further for dark text.
+    # v6.2 AA audit: slate-600 on every card tint (>=6.7:1 on all 12).
     meta_text = "text-slate-600"
     esc_name = html.escape(c["name"])
     esc_desc = html.escape(c["description"] or "")
     card_topics = _display_topics(c["topics"])
     esc_topics = html.escape(" ".join(card_topics), quote=True)
-    # Search haystack (name + description, lowercased): the JS filters on
-    # this plain attribute -> no JSON-in-attribute quoting bug class.
     esc_search = html.escape(
         (c["name"] + " " + (c["description"] or "")).lower(), quote=True)
-    # Sort keys baked as data attributes (spec v6 item 3, rank added in
-    # v6.2 item 6): data-title = lowercased repo name (stable
-    # lexicographic key), data-ts = pushed_at ISO (chronological key),
-    # data-catrank = category rank int (default-order key). All
-    # quote-escaped; missing values -> "".
     esc_ts = html.escape(c["pushed_at"] or "", quote=True)
-    # Teaching axes baked as data attributes (spec v7): the Formation/
-    # Filière selects and the grouping headers read these; cards without
-    # the topics carry the empty string (inert for both axes).
     esc_formation = html.escape(c.get("formation", ""), quote=True)
     esc_filiere = html.escape(c.get("filiere", ""), quote=True)
     esc_sortkey = html.escape(_default_sortkey(c), quote=True)
+    # Content dates (fetched per ref in fetch_extras). A None (fetch
+    # failure or no stable tag) falls back to pushed_at for DISPLAY only;
+    # the raw values gate the conditional chips (no inferred "nouveau").
+    dates = c.get("dates") or {}
+    latest_raw = dates.get("latest")
+    stable_raw = dates.get("stable")
+    branch_dates = dates.get("branches") or {}
+    latest_ref = dates.get("latest_ref") or c.get("default_branch") or "develop"
+    latest_iso = latest_raw or c["pushed_at"]
+    stable_iso = stable_raw or c["pushed_at"]
     parts = [
         '<article data-area="%s" data-topics="%s" data-search="%s" '
         'data-title="%s" data-ts="%s" data-catrank="%d" '
         'data-formation="%s" data-filiere="%s" data-sortkey="%s" '
-        'class="card rounded-lg border p-4 shadow-sm %s">'
+        'class="card flex flex-col rounded-lg border p-4 shadow-sm %s">'
         % (cat, esc_topics, esc_search,
            html.escape(c["name"].lower(), quote=True), esc_ts,
            CATEGORY_RANK.get(cat, CATEGORY_RANK["none"]),
            esc_formation, esc_filiere, esc_sortkey,
            CATEGORY_TINT.get(cat, CATEGORY_TINT["none"])),
-        '<div class="flex flex-wrap items-center gap-2">'
-        '<span class="chip uppercase tracking-wide %s">%s</span>%s</div>'
-        % (CATEGORY_CHIP.get(cat, CATEGORY_CHIP["none"]),
-           CATEGORY_LABELS[cat].upper(), _status_chip(c["status"], is_muted)),
     ]
-    # Primary line links to the site: ``stable/`` when the repo has a v* tag
-    # (same condition as the Stable button), ``develop/`` otherwise.
+
+    # --- HEADER: description (primary) + repo slug (mono secondary) -----
     primary_url = "%s/%s/%s/" % (
         SITE_BASE, c["name"], "stable" if c["latest_vtag"] else "develop")
     if esc_desc:
         parts.append(
             '<a href="%s" target="_blank" rel="noopener" '
-            'class="mt-1 block text-base font-medium leading-snug '
+            'class="block text-base font-semibold leading-snug '
             'text-slate-900 line-clamp-2 hover:text-indigo-700 '
             'hover:underline">%s</a>' % (primary_url, esc_desc))
         parts.append(
             '<a href="%s" target="_blank" rel="noopener" '
-            'class="mt-1 block break-all font-mono text-[13px] %s '
+            'class="mt-1 block break-all font-mono text-xs %s '
             'hover:text-indigo-700">%s</a>'
             % (c["github_url"], meta_text, esc_name))
     else:
         parts.append(
             '<a href="%s" target="_blank" rel="noopener" '
-            'class="mt-1 block break-all text-base font-semibold '
+            'class="block break-all text-base font-semibold '
             'text-slate-900 hover:text-indigo-700 hover:underline">'
             '%s</a>' % (primary_url, esc_name))
-    # Topic pastilles = filter TOGGLES (spec v6 item 4, hygiene v6.2 item
-    # 5): the repo's non-system topics (see _display_topics — area-*,
-    # status-* and the SYSTEM_TOPICS markers are labelling machinery, not
-    # subjects, and render nowhere), sorted alphabetically, as neutral
-    # monospace BUTTONS carrying data-topic + aria-pressed="false". The
-    # JS toggles the topic into the single active-topic Set (shared with
-    # the Thèmes select and the × chips) and syncs every same-topic pill
-    # on every card (pressed style: chip-pill-active + aria-pressed).
-    # Without JS they are INERT BUTTONS (progressive enhancement) — the
-    # card content and links stay fully usable; they remain the no-JS
-    # visible topic metadata.
+
+    # --- META ROW: taxonomy chips LEFT, content date RIGHT (fixed slot) --
+    parts.append(
+        '<div class="mt-2 flex flex-wrap items-center gap-2">'
+        '<span class="chip uppercase tracking-wide %s">%s</span>%s%s</div>'
+        % (CATEGORY_CHIP.get(cat, CATEGORY_CHIP["none"]),
+           CATEGORY_LABELS[cat].upper(),
+           _status_chip(c["status"], is_muted),
+           _date_span(latest_iso,
+                      "ml-auto shrink-0 whitespace-nowrap text-[13px] "
+                      + meta_text)))
+
+    # --- BODY: topic pastilles as filter toggles (unchanged from v7) -----
     pills = card_topics
     if pills:
         parts.append(
@@ -938,66 +1006,83 @@ def _render_card(c):
                    html.escape(t))
                 for t in pills))
 
-    # Uniform action row (spec v6 item 1, Source slot removed in v6.2
-    # item 2): ALWAYS the 3 slots in the order Stable · Latest · Branches.
-    # A missing target is a disabled placeholder (unfocusable span,
-    # aria-disabled, explanatory title), never a hidden slot, so every
-    # card row has the same shape. The GitHub source stays one click away
-    # via the repo-name subtitle link. The row is flex-nowrap (measured:
-    # the three slots fit one line inside a 360px card; gap tightens below
-    # sm as margin) and the Branches caret occupies a fixed track (v6.2
-    # item 4) so opening the disclosure never re-wraps the row.
-    links = []
-    # Stable: solid accent, only enabled when the repo has a v* tag; points
-    # at the canonical ``stable/`` pointer path written by the deploy-static
-    # job (v1.3.23+) on v* tag deploys.
-    if c["latest_vtag"]:
-        links.append(
-            '<a class="lnk lnk-primary" title="Dernière version : %s" '
-            'href="%s/%s/stable/" target="_blank" rel="noopener">'
-            'Stable</a>'
-            % (html.escape(c["latest_vtag"]), SITE_BASE, c["name"]))
-    else:
-        links.append(_disabled_slot("Stable", "Aucune version publiée"))
-    # Latest = the develop render (always enabled: all three categories are
-    # Quarto render-callers).
-    links.append(
-        '<a class="lnk" href="%s/%s/develop/" target="_blank" '
-        'rel="noopener">Latest</a>' % (SITE_BASE, c["name"]))
-    # Branches: native <details> disclosure of the non-default branches,
-    # each linking the previews/<sanitized>/ path (branch "/" -> "-").
-    # Disabled placeholder when the fetch failed or the repo has no
-    # non-default branch (works without JS either way).
+    # --- FOOTER (mt-auto, hairline border-top, no fill) ------------------
+    foot = ['<footer class="mt-auto border-t border-slate-200 pt-3">']
+    # Branches: native <details> disclosure as a full-width subdued
+    # text-link + chevron (.dd-link, NOT a button-class element); every
+    # row shows its own per-branch content date (absolute visible +
+    # data-commit relative rewrite). Omitted entirely when the repo has
+    # no disclosed branch (the v6 disabled placeholder is gone).
     if c["branches"]:
         items = "".join(
-            '<li><a class="block min-h-11 whitespace-nowrap px-3 py-3 font-mono '
-            'text-[13px] text-slate-700 hover:bg-slate-100 '
-            'hover:text-indigo-700" '
+            '<li><a class="flex min-h-11 items-center gap-3 '
+            'whitespace-nowrap px-3 py-3 font-mono text-[13px] '
+            'text-slate-700 hover:bg-slate-100 hover:text-indigo-700" '
             'href="%s/%s/previews/%s/" target="_blank" rel="noopener">'
-            '%s</a></li>'
-            % (SITE_BASE, c["name"], html.escape(b.replace("/", "-")),
-               html.escape(b))
+            '<span>%s</span>%s</a></li>'
+            % (SITE_BASE, c["name"],
+               html.escape(b.replace("/", "-"), quote=True), html.escape(b),
+               _date_span(branch_dates.get(b) or c["pushed_at"],
+                          "ml-auto shrink-0 text-[13px] text-slate-600"))
             for b in c["branches"])
-        links.append(
-            '<details class="dd"><summary class="lnk chev" '
+        foot.append(
+            '<details class="dd dd-full"><summary class="dd-link chev" '
             'aria-expanded="false">Branches</summary>'
             '<ul class="dd-list max-h-64 overflow-y-auto py-1">%s</ul>'
             '</details>' % items)
-    else:
-        links.append(_disabled_slot("Branches", "Aucune branche"))
-    parts.append(
-        '<footer class="mt-4 flex flex-nowrap items-center '
-        'gap-1.5 sm:gap-2">%s</footer>' % "".join(links))
-    # Date: ABSOLUTE French date + HH:MM (Europe/Paris at build time,
-    # spec v6.2 item 1). The <time> element carries the full UTC ISO
-    # timestamp in datetime (and title as a plain-text fallback); no JS
-    # rewrites clock-dependent text anywhere on the card.
-    abs_date = _abs_datetime_fr(c["pushed_at"])
-    if abs_date:
-        parts.append(
-            '<div class="mt-3 text-[13px] %s">Mis à jour '
-            '<time datetime="%s" title="%s">%s</time></div>'
-            % (meta_text, esc_ts, esc_ts, html.escape(abs_date)))
+    # Action grid: Stable (solid primary, BEFORE Latest) only when the
+    # repo has a v* tag - then Latest spans the full width (grid-cols-1).
+    # Dates live ONLY in the tooltips, never in the labels.
+    btns = []
+    if c["latest_vtag"]:
+        stable_abs = _abs_datetime_fr(stable_iso)
+        btns.append(
+            '<a class="btn btn-primary" title="%s" '
+            'href="%s/%s/stable/" target="_blank" rel="noopener">'
+            'Stable</a>'
+            % (html.escape(
+                "Stable · contenu du %s (%s)"
+                % (stable_abs or "date inconnue", c["latest_vtag"]),
+                quote=True), SITE_BASE, c["name"]))
+    latest_abs = _abs_datetime_fr(latest_iso)
+    # The relative tooltip form ("Latest · <ref>, il y a X") cannot be
+    # baked static: the JS rewrites title from data-tip-date at load.
+    tip_attrs = ""
+    if latest_abs:
+        tip_attrs = (' data-tip-prefix="%s, " data-tip-date="%s"'
+                     % (html.escape("Latest · " + latest_ref, quote=True),
+                        html.escape(latest_iso, quote=True)))
+    btns.append(
+        '<a class="btn"%s title="%s" href="%s/%s/develop/" target="_blank" '
+        'rel="noopener">Latest</a>'
+        % (tip_attrs,
+           html.escape("Latest · %s, contenu du %s"
+                       % (latest_ref, latest_abs or "date inconnue"),
+                       quote=True),
+           SITE_BASE, c["name"]))
+    grid_cols = "grid-cols-2" if c["latest_vtag"] else "grid-cols-1"
+    foot.append('<div class="mt-3 grid %s gap-2">%s</div>'
+                % (grid_cols, "".join(btns)))
+    # Conditional chips (zero noise when neither applies).
+    chips = ""
+    if latest_raw and stable_raw and latest_raw > stable_raw:
+        chips += ('<span class="chip chip-new" title="%s">nouveau depuis '
+                  'la stable</span>'
+                  % html.escape("contenu %s plus récent que la stable %s"
+                                % (latest_ref, c["latest_vtag"]),
+                                quote=True))
+    if latest_iso and generated_at and latest_iso > generated_at:
+        chips += ('<span class="chip chip-pending" title="%s">build en '
+                  'attente</span>'
+                  % html.escape("contenu du %s postérieur à la génération "
+                                "du catalogue (%s)"
+                                % (latest_iso, generated_at), quote=True))
+    if chips:
+        foot.append(
+            '<div class="mt-2 flex flex-wrap items-center gap-2">%s</div>'
+            % chips)
+    foot.append("</footer>")
+    parts.extend(foot)
     parts.append("</article>")
     return "\n      ".join(parts)
 
@@ -1093,7 +1178,7 @@ def _render_index(cards, generated_at):
                       for fi in orphaned))
     filiere_opts = ('<option value="">Filière…</option>'
                     + "".join(filiere_groups))
-    grid = "\n      ".join(_render_card(c) for c in cards)
+    grid = "\n      ".join(_render_card(c, generated_at) for c in cards)
     # Cache-buster for app.css (v6.3): compact UTC stamp of this generation
     # (YYYYMMDDHHMM). Changes every deploy -> new URL -> no stale heuristic
     # cache of the stylesheet (see the <link> comment below).
@@ -1213,10 +1298,12 @@ def _render_index(cards, generated_at):
     // (métadonnée de thèmes visible, sans filtrage) et la sélection
     // "Thèmes" est un contrôle inerte ; l'ordre de construction (rang de
     // catégorie puis nom complet A→Z, spec v6.2 item 6) s'applique.
-    // Les dates sont absolues au build (date FR + heure Europe/Paris) :
-    // AUCUN texte dépendant de l'horloge n'est généré côté client (la
-    // réécriture relative v4/v5 dérivait entre deux déploiements —
-    // retirée en v6).
+    // Dates de contenu : la page est livrée avec la date absolue
+    // (juste sans JS, conservée dans l'infobulle title) ; au chargement,
+    // le texte est réécrit "il y a X" RE-CALCULÉ depuis l'ISO data-commit
+    // à CHAQUE vue — la dérive v4/v5 entre deux déploiements est
+    // structurellement impossible ici (rien de relatif n'est cuit au
+    // build).
     const grid = document.getElementById('grid');
     const cards = [...grid.querySelectorAll('article')];
     const originalOrder = [...cards];      // ordre de construction (reset du tri)
@@ -1244,6 +1331,27 @@ def _render_index(cards, generated_at):
       const s = d.querySelector('summary[aria-expanded]');
       if (s) d.addEventListener("toggle", () =>
         s.setAttribute("aria-expanded", String(d.open)));
+    });
+
+    // Dates de contenu : "il y a X" recalculé à chaque vue depuis l'ISO
+    // (ruling 1 — jamais périmé entre deux builds cron ; sans JS, l'absolu
+    // visible reste exact).
+    function relFr(iso) {
+      const s = (Date.now() - new Date(iso).getTime()) / 1000;
+      if (s < 3600) return "il y a " + Math.max(1, Math.floor(s / 60)) + " min";
+      const d = Math.floor(s / 86400);
+      if (d < 1) return "il y a " + Math.floor(s / 3600) + " h";
+      if (d < 7) return "il y a " + d + " j";
+      if (d < 365) return "il y a " + Math.floor(d / 7) + " sem";
+      return d < 730 ? "il y a 1 an" : "il y a " + Math.floor(d / 365) + " ans";
+    }
+    document.querySelectorAll('[data-commit]').forEach(el => {
+      el.textContent = relFr(el.dataset.commit);
+    });
+    // Infobulle "Latest" : la forme relative ne peut pas être statique,
+    // on la recalcule ici (préfixe porté par data-tip-prefix).
+    document.querySelectorAll('[data-tip-date]').forEach(el => {
+      el.title = el.dataset.tipPrefix + relFr(el.dataset.tipDate);
     });
 
     // Filtre AND : catégorie x recherche x intersection des thèmes
@@ -1566,15 +1674,17 @@ def main():
                           or "https://github.com/%s/%s" % (ORG, r["name"]),
         })
 
-    # Per-repo branches + v* tags for the footer buttons (ThreadPool(8),
-    # 2 REST calls per displayed repo; failures hide the buttons).
+    # Per-repo branches + v* tags + content dates for the v8 card
+    # anatomy (ThreadPool(8), 2 base + ≤14 commits REST calls per repo at
+    # the global 5/s pacing; date failures fall back to pushed_at).
     extras_started = time.time()
     extras = fetch_extras([(c["name"], c["default_branch"]) for c in cards])
     for c in cards:
-        branches, latest_vtag = extras.get(c["name"], ([], None))
+        branches, latest_vtag, dates = extras.get(c["name"], ([], None, {}))
         c["branches"] = branches
         c["latest_vtag"] = latest_vtag
-    print("Branches/tags: %d repos in %.1fs" %
+        c["dates"] = dates
+    print("Branches/tags/dates: %d repos in %.1fs" %
           (len(cards), time.time() - extras_started))
 
     # Deterministic default order (spec v6.2 item 6, refined v7 item 5):

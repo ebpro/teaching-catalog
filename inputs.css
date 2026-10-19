@@ -45,31 +45,29 @@
     @apply z-10;
   }
 
-  /* Footer / header action links: min-height 44px tap target, sober outline
-     by default; .lnk-primary is the single-accent solid variant (Stable). */
+  /* Page-chrome action links (contact): min-height 44px tap target, sober
+     outline. The card action grid uses the v8 .btn / .btn-primary pair. */
   .lnk {
     @apply inline-flex min-h-11 items-center justify-center rounded-md
       border border-slate-300 bg-white px-3 text-sm font-medium
       text-slate-700 transition-colors
       hover:border-indigo-700 hover:text-indigo-700;
   }
-  .lnk-primary {
+  /* v8 card action-grid buttons: same 44px min-height as .lnk (ruling 2 —
+     tap targets retained), .btn = secondary outline, .btn-primary = solid
+     single accent (Stable, BEFORE Latest); used in the 1fr/1fr footer
+     grid. The v6 .lnk-primary / .lnk-disabled pair is gone: v8 omits the
+     Stable button entirely when the repo has no v* tag (no disabled
+     placeholder), so Latest spans the full width instead. */
+  .btn {
+    @apply inline-flex min-h-11 items-center justify-center rounded-md
+      border border-slate-300 bg-white px-3 text-sm font-medium
+      text-slate-700 transition-colors
+      hover:border-indigo-700 hover:text-indigo-700;
+  }
+  .btn-primary {
     @apply border-indigo-700 bg-indigo-700 text-white
       hover:border-indigo-800 hover:bg-indigo-800 hover:text-white;
-  }
-  /* Disabled action slot (uniform card row, spec v6): applied ON TOP of
-     .lnk so the box (44px min-height, border, radius, padding) is
-     identical; only the colours change. slate-500 on white = 4.76:1,
-     AA for the 14px label text (NOT slate-400, which fails). The span is
-     unfocusable by construction (never a <button disabled>). The :hover
-     rule below cancels .lnk's indigo hover shift — same specificity as
-     .lnk:hover, later in source order wins inside the layer. */
-  .lnk-disabled {
-    @apply border-slate-200 bg-white text-slate-500;
-    cursor: default;
-  }
-  .lnk-disabled:hover {
-    @apply border-slate-200 bg-white text-slate-500;
   }
 
   /* Category segmented control (aria-pressed marks the active one — the JS
@@ -120,6 +118,22 @@
   .chip-topic {
     @apply border-slate-200 bg-slate-50 font-mono text-slate-600;
   }
+  /* v8 outline variant: status chips with no tonal mapping (the meta row
+     keeps the tonal pastille when one exists, outline otherwise). */
+  .chip-outline {
+    @apply border-slate-300 bg-white text-slate-600;
+  }
+  /* v8 conditional footer chips: zero noise — rendered only when their
+     condition holds. Later in the layer, so they override the .chip base
+     padding/size at equal specificity. */
+  .chip-new {
+    @apply border-indigo-200 bg-white px-1.5 py-0 text-[11px]
+      text-indigo-700;
+  }
+  .chip-pending {
+    @apply border-amber-200 bg-white px-1.5 py-0 text-[11px]
+      text-amber-800;
+  }
   /* Topic pills are filter toggles (spec v6): hover affordance on the
      unpressed ones only (the pressed look must not flicker on hover).
      Without JS the buttons do nothing but they still read as labels —
@@ -166,6 +180,17 @@
   .dd-list {
     @apply absolute left-0 top-full z-30 mt-1 min-w-full rounded-md
       border border-slate-200 bg-white shadow-lg;
+  }
+  /* v8 Branches disclosure: full-width in the footer card column (after
+     .dd so it wins on equal specificity) with a subdued text-link +
+     trailing chevron summary (.chev keeps its fixed reserved track). */
+  .dd-full {
+    @apply block w-full;
+  }
+  .dd-link {
+    @apply flex min-h-11 w-full items-center justify-between bg-transparent
+      px-0 text-left text-sm font-medium text-slate-500
+      transition-colors hover:text-indigo-700;
   }
 
   /* Caret on disclosure summaries (CSS-drawn, no icon font/emoji).
