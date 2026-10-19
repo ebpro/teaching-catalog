@@ -31,9 +31,12 @@ self-contained static card grid of the teaching surface under ``./public/``:
     subdued text-link + chevron (``.dd-link``, 44px), each branch row
     carrying its own per-branch content date (same data-commit
     pattern); a 1fr/1fr action grid of 44px buttons - ``Stable``
-    (``.btn-primary`` solid accent, only when the repo has a ``v*`` tag;
-    omitted otherwise and then ``Latest`` spans the full width) BEFORE
-    ``Latest`` (``.btn`` outline); content dates live ONLY in the button
+    (``.btn-primary`` solid accent, only when the repo has a ``v*`` tag)
+    BEFORE ``Latest`` (``.btn`` outline, ONLY when the repo has a
+    ``develop`` branch - v8.1 ruling: Latest is strictly the develop
+    tip, no default-branch fallback; the button is omitted when the
+    branch is absent, and a lone remaining button spans the full width);
+    content dates live ONLY in the button
     tooltips (Latest rewritten to the relative form at load via
     ``data-tip-*``), never inside the labels; then the conditional
     ``nouveau depuis la stable`` (Latest tip newer than the stable tag
@@ -74,7 +77,8 @@ self-contained static card grid of the teaching surface under ``./public/``:
     (safe now that the daisyUI .card{display:flex} override is gone).
 
 Branch/tag/content-date data is fetched per displayed repo (2 base REST
-calls + one commits call per dated ref: Latest ref, stable tag, at most 12
+calls + one commits call per dated ref: Latest ref (``develop``, only when
+the repo has that branch - v8.1), stable tag, at most 12
 disclosed branches; ThreadPool(8), global 5 calls/s pacing); a failed date
 falls back silently to the repo pushed_at (see _render_card). Site URLs are NOT
 probed at build time; a stale link is acceptable (see the stable-pointer
@@ -707,10 +711,13 @@ def _fetch_repo_extras(name, default_branch):
 
     Base: 2 REST calls (branches + tags, per_page=100, single page), as
     before. Content dates (v8 anatomy): one extra commits call each for
-    the Latest ref (``develop`` when the repo has one - the branch the
-    Latest button renders - else the default branch), the latest ``v*``
-    tag when present (the Stable content date), and at most
-    MAX_DATED_BRANCHES of the disclosed branches. ``dates``:
+    the Latest ref, the latest ``v*`` tag when present (the Stable
+    content date), and at most MAX_DATED_BRANCHES of the disclosed
+    branches. v8.1 user ruling: the Latest ref is STRICTLY ``develop`` -
+    set only when ``develop`` is in the repo's branches list; when the
+    repo has no develop branch both ``latest_ref`` and ``latest`` are
+    None and NO date call is made for any fallback ref (the Latest
+    affordance is then simply absent). ``dates``:
     ``{"latest_ref", "latest", "stable", "branches": {name: iso}}`` with
     None for every ref whose fetch failed (renderer falls back).
     """
@@ -731,10 +738,13 @@ def _fetch_repo_extras(name, default_branch):
     excluded = {default_branch, "gh-pages", "develop"}
     branches = sorted(b for b in raw if b not in excluded)
     latest_vtag = _latest_vtag(tg or [])
-    latest_ref = "develop" if "develop" in raw else (default_branch or "HEAD")
+    # v8.1 (user ruling): Latest is ALWAYS the develop tip - never
+    # another branch. No develop branch -> no Latest ref, no date call,
+    # and the renderer omits the Latest button entirely.
+    latest_ref = "develop" if "develop" in raw else None
     dates = {
         "latest_ref": latest_ref,
-        "latest": _commit_date(name, latest_ref),
+        "latest": _commit_date(name, latest_ref) if latest_ref else None,
         "stable": _commit_date(name, latest_vtag) if latest_vtag else None,
         "branches": {},
     }
@@ -908,9 +918,14 @@ def _render_card(c, generated_at):
         own per-branch content date; a 1fr/1fr grid (``grid-cols-2``) of
         44px action buttons (ruling 2: ``.btn`` keeps the ``min-h-11``
         tap-target size) - ``Stable`` (``.btn-primary`` solid accent,
-        BEFORE ``Latest``) rendered ONLY when the repo has a v* tag, and
-        then ``Latest`` spans the full width (``grid-cols-1``). Content
-        dates live ONLY in the button tooltips, never inside the labels
+        BEFORE ``Latest``) rendered ONLY when the repo has a v* tag and
+        ``Latest`` rendered ONLY when the repo has a develop branch
+        (v8.1 user ruling: Latest is strictly the develop tip; no
+        develop -> no Latest button, mirroring no-tag -> no-Stable).
+        Exactly one button spans the full width (``grid-cols-1``); no
+        button at all -> no action row (the Branches disclosure stays).
+        Content dates live ONLY in the button tooltips, never inside the
+        labels
         (the Latest tooltip is rewritten to the relative form at load
         via ``data-tip-prefix``/``data-tip-date``). Then the conditional
         chips: "nouveau depuis la stable" (Latest tip strictly newer
@@ -946,7 +961,10 @@ def _render_card(c, generated_at):
     latest_raw = dates.get("latest")
     stable_raw = dates.get("stable")
     branch_dates = dates.get("branches") or {}
-    latest_ref = dates.get("latest_ref") or c.get("default_branch") or "develop"
+    # v8.1 (user ruling): Latest is strictly develop. dates["latest_ref"]
+    # is None when the repo has no develop branch -> no Latest button is
+    # rendered and no default-branch value feeds its tooltip or href.
+    latest_ref = dates.get("latest_ref")
     latest_iso = latest_raw or c["pushed_at"]
     stable_iso = stable_raw or c["pushed_at"]
     parts = [
@@ -1031,8 +1049,9 @@ def _render_card(c, generated_at):
             '<ul class="dd-list max-h-64 overflow-y-auto py-1">%s</ul>'
             '</details>' % items)
     # Action grid: Stable (solid primary, BEFORE Latest) only when the
-    # repo has a v* tag - then Latest spans the full width (grid-cols-1).
-    # Dates live ONLY in the tooltips, never in the labels.
+    # repo has a v* tag; Latest only when the repo has a develop branch
+    # (v8.1). One button -> grid-cols-1 (full width), two -> grid-cols-2,
+    # none -> no action row. Dates live ONLY in the tooltips.
     btns = []
     if c["latest_vtag"]:
         stable_abs = _abs_datetime_fr(stable_iso)
@@ -1044,25 +1063,34 @@ def _render_card(c, generated_at):
                 "Stable · contenu du %s (%s)"
                 % (stable_abs or "date inconnue", c["latest_vtag"]),
                 quote=True), SITE_BASE, c["name"]))
-    latest_abs = _abs_datetime_fr(latest_iso)
+    # Latest (.btn outline): ONLY when the repo has a develop branch
+    # (v8.1 user ruling — Latest is strictly the develop tip; no
+    # develop -> no button, mirroring the no-tag -> no-Stable pattern).
     # The relative tooltip form ("Latest · <ref>, il y a X") cannot be
     # baked static: the JS rewrites title from data-tip-date at load.
-    tip_attrs = ""
-    if latest_abs:
-        tip_attrs = (' data-tip-prefix="%s, " data-tip-date="%s"'
-                     % (html.escape("Latest · " + latest_ref, quote=True),
-                        html.escape(latest_iso, quote=True)))
-    btns.append(
-        '<a class="btn"%s title="%s" href="%s/%s/develop/" target="_blank" '
-        'rel="noopener">Latest</a>'
-        % (tip_attrs,
-           html.escape("Latest · %s, contenu du %s"
-                       % (latest_ref, latest_abs or "date inconnue"),
-                       quote=True),
-           SITE_BASE, c["name"]))
-    grid_cols = "grid-cols-2" if c["latest_vtag"] else "grid-cols-1"
-    foot.append('<div class="mt-3 grid %s gap-2">%s</div>'
-                % (grid_cols, "".join(btns)))
+    if latest_ref:
+        latest_abs = _abs_datetime_fr(latest_iso)
+        tip_attrs = ""
+        if latest_abs:
+            tip_attrs = (' data-tip-prefix="%s, " data-tip-date="%s"'
+                         % (html.escape("Latest · " + latest_ref,
+                                        quote=True),
+                            html.escape(latest_iso, quote=True)))
+        btns.append(
+            '<a class="btn"%s title="%s" href="%s/%s/develop/" '
+            'target="_blank" rel="noopener">Latest</a>'
+            % (tip_attrs,
+               html.escape("Latest · %s, contenu du %s"
+                           % (latest_ref, latest_abs or "date inconnue"),
+                           quote=True),
+               SITE_BASE, c["name"]))
+    # Exactly one button -> full-width single column; both -> 1fr/1fr;
+    # neither -> no action row at all (footer keeps the Branches
+    # disclosure).
+    if btns:
+        grid_cols = "grid-cols-2" if len(btns) == 2 else "grid-cols-1"
+        foot.append('<div class="mt-3 grid %s gap-2">%s</div>'
+                    % (grid_cols, "".join(btns)))
     # Conditional chips (zero noise when neither applies).
     chips = ""
     if latest_raw and stable_raw and latest_raw > stable_raw:
