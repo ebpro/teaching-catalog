@@ -35,7 +35,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: catalog-site
-          path: public/
+          # Two top-level dirs land in the artifact (shared parent =
+          # workspace): public/ (the catalog site) and roots/ (per-repo
+          # root card pages, v8.4). The deploy job downloads both to the
+          # workspace root and rsyncs them to different destinations.
+          path: |
+            public/
+            roots/
   deploy:
     needs: build
     runs-on: [self-hosted, linux, ebpro-org, x64]
@@ -44,7 +50,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: catalog-site
-          path: public/
+          # Unpack to the workspace root so the artifact's two top-level
+          # dirs reappear as ./public/ and ./roots/ (the rsync steps
+          # below address them by those paths).
+          path: ${{ github.workspace }}
       - name: Ensure rsync is available
         run: |
           set -euo pipefail
@@ -87,11 +96,29 @@ jobs:
           rsync -az --delete --mkpath -e "ssh $SSH_OPTS" \
             ./public/ "${REMOTE}:teaching-material/catalog/"
 
+          # --- per-repo root card pages (v8.4): ADDITIVE sync, no --delete.
+          #     Each roots/<repo>/index.html lands on teaching-material/<repo>/;
+          #     the rendered <branch>/ directories beside it are never touched.
+          #     Note-and-accept: deploy-static still rewrites a plain
+          #     placeholder over a repo root until the next catalog build
+          #     (self-heals via trigger-catalog). ---
+          if [ -d ./roots ]; then
+            rsync -az --mkpath -e "ssh $SSH_OPTS" \
+              ./roots/ "${REMOTE}:teaching-material/"
+            echo "✅ root card pages synchronisés ($(find ./roots -name index.html | wc -l | tr -d ' ') fichiers)"
+          else
+            echo "::notice::./roots absent — root card sync ignoré (artifact public/ uniquement)"
+          fi
+
           # --- drop root redirect index (single file, no --delete at root) ---
+          # mktemp creates mode 600 and scp preserves bits: without the
+          # chmod the host serves the file with a 403 (Apache denies
+          # world-unreadable files). chmod 644 BEFORE scp.
           INDEX_TMP="$(mktemp)"
           cat > "$INDEX_TMP" <<'EOF'
-          <!doctype html><html lang="fr"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=catalog/"><title>ebpro</title></head><body><p><a href="catalog/">Catalog ebpro</a></p></body></html>
+          <!doctype html><html lang="fr"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=catalog/"><link rel="canonical" href="catalog/"><title>ebpro</title></head><body><p><a href="catalog/">Catalog ebpro</a></p></body></html>
           EOF
+          chmod 644 "$INDEX_TMP"
           scp -i "$KEY_FILE" -o StrictHostKeyChecking=accept-new \
             "$INDEX_TMP" "${REMOTE}:teaching-material/index.html"
           rm -f "$INDEX_TMP"

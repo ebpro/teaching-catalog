@@ -101,6 +101,16 @@ without FOUC. Fonts are the system stack, no images or icons. Running
 ``python catalog.py`` locally regenerates index.html; the CSS step is
 ``npx tailwindcss@3 -c tailwind.config.js -i inputs.css -o public/app.css --minify``.
 
+Alongside the grid, the build emits ONE ROOT CARD PAGE per catalogued repo
+under ``roots/<repo>/index.html`` (v8.4): the repo's own card (title,
+description, category/status pastilles, gated Stable/Latest/preview links)
+on a minimal standalone page, deployed by the workflow with a second,
+``--delete``-free rsync so the rendered ``<branch>/`` directories beside it
+are never touched. The page links the shared stylesheet through the
+deployed sibling path ``../catalog/app.css?v=…``; every class literal is
+reused verbatim from the index templates (the purge scans this file alone,
+so reusing existing literals needs no CSS rebuild semantics change).
+
 Pure Python 3 stdlib. Auth: reads ``GITHUB_TOKEN`` (required) from the
 environment. The ``cleanup`` subcommand (Cloudflare Pages preview pruning,
 kept for ``.github/workflows/cleanup.yml``) additionally reads
@@ -138,6 +148,11 @@ except Exception:  # noqa: BLE001 - ImportError / ZoneInfoNotFoundError / OSErro
 ORG = "ebpro"
 API = "https://api.github.com"
 OUT_DIR = "public"
+# Sibling output (v8.4): per-repo root card pages under
+# ``roots/<repo>/index.html``, rsynced ADDITIVELY (no --delete) to
+# ``teaching-material/<repo>/`` by the catalog workflow. Deployed outside
+# catalog/, hence the ``../catalog/`` relative asset links in the page.
+ROOTS_DIR = "roots"
 USER_AGENT = "ebpro-teaching-catalog"
 
 # Base under which the rendered course sites are published (deploy-static
@@ -161,7 +176,7 @@ SITE_BASE = "https://bruno.univ-tln.fr/teaching-material"
 CATEGORIES = ("lecture", "notebook", "sample")
 
 # Repos taught as samples regardless of their name prefix (user decision).
-FORCED_SAMPLES = ("hellogit", "conflictbot")
+FORCED_SAMPLES = ("hellogit", "conflictbot", "fullstack-minimal-app")
 
 CATEGORY_LABELS = {
     "lecture": "Lecture",
@@ -1129,6 +1144,60 @@ def _render_card(c, generated_at):
     return "\n      ".join(parts)
 
 
+def _render_root_page(c, generated_at):
+    """Return the standalone root card page for one catalog entry ``c``.
+
+    Written to ``roots/<repo>/index.html`` at build time and deployed
+    additively (rsync WITHOUT --delete) to
+    ``teaching-material/<repo>/index.html``, where it replaces
+    deploy-static's plain placeholder until that job rewrites it (the
+    catalog build self-heals the card via trigger-catalog). The body is
+    the UNMODIFIED ``_render_card`` output, so the same data gates apply
+    as on the grid: the develop/Latest link only when ``develop`` is in
+    the branches data, Stable only when the repo has a ``latest_vtag``
+    whose releases render is probe-confirmed live (``releases_live``),
+    preview links per disclosed branch from ``branches``. Progressive
+    enhancement: the topic pills are inert buttons here (no filter JS on
+    this page), the Branches <details> disclosure is native.
+
+    Constraint (v8.4): every class literal below is reused VERBATIM from
+    this file's existing templates (purge scans catalog.py alone; the
+    reuse guarantees app.css already carries them). The stylesheet is
+    reached via the deployed sibling path ``../catalog/app.css`` with the
+    same generation cache-buster as the index page. The HTML comment
+    ``ebpro-teaching-catalog root-card`` is the body signature
+    distinguishing this genuine page from the host's DokuWiki catch-all.
+    """
+    css_ver = generated_at[:16].replace("-", "").replace(":", "").replace("T", "")
+    esc_name = html.escape(c["name"], quote=True)
+    return (
+        '<!DOCTYPE html>\n'
+        '<html lang="fr">\n'
+        '<head>\n'
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<meta name="color-scheme" content="light">\n'
+        '<title>%s · Supports pédagogiques · '
+        'Emmanuel BRUNO</title>\n'
+        '<link rel="stylesheet" href="../catalog/app.css?v=%s">\n'
+        '</head>\n'
+        '<body class="min-h-screen bg-slate-50 text-slate-900 '
+        'antialiased">\n'
+        '<!-- ebpro-teaching-catalog root-card v1 repo=%s generated=%s '
+        '-->\n'
+        '<main class="mx-auto max-w-3xl px-4 py-6">\n'
+        '<p class="text-sm"><a class="lnk" href="../catalog/">'
+        '&larr; Tous les supports</a></p>\n'
+        '<div class="mt-3">\n%s\n</div>\n'
+        '</main>\n'
+        '</body>\n'
+        '</html>\n'
+        % (esc_name, css_ver, esc_name,
+           html.escape(generated_at, quote=True),
+           _render_card(c, generated_at))
+    )
+
+
 def _render_index(cards, generated_at):
     """Return the full index.html source (v6: purged local app.css, no CDN).
 
@@ -1780,6 +1849,18 @@ def main():
             "repos": cards,
         }, f, indent=2, ensure_ascii=False)
         f.write("\n")
+
+    # v8.4 per-repo root card pages: roots/<repo>/index.html (deployed
+    # additively over the teaching-material roots, see catalog.yml).
+    # Repo names are GitHub-safe slugs; one directory per catalogued card.
+    roots_started = time.time()
+    for c in cards:
+        repo_dir = os.path.join(ROOTS_DIR, c["name"])
+        os.makedirs(repo_dir, exist_ok=True)
+        _write_file(os.path.join(repo_dir, "index.html"),
+                    _render_root_page(c, generated_at))
+    print("Root card pages: %d under %s/ in %.1fs" %
+          (len(cards), ROOTS_DIR, time.time() - roots_started))
 
     print("Total: %d catalog cards from %d org repos in %.1fs | "
           "API calls: %d" % (len(cards), len(all_repos),
