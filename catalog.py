@@ -4,10 +4,17 @@
 Scans the ``ebpro`` GitHub org (``GET /orgs/ebpro/repos``) and renders a
 self-contained static card grid of the teaching surface under ``./public/``:
 
-  * three display categories assigned by repo NAME PREFIX (spec v3):
-    ``lecture-`` -> Lecture, ``notebook-`` -> Notebook, ``sample-`` ->
-    Samples (+ FORCED_SAMPLES names); archived repos, repos carrying the
-    ``status-legacy`` topic and non-matching names are excluded entirely,
+  * display categories assigned by GitHub ``area-*`` TOPIC (spec v8.6,
+    replacing the v3 name-prefix rule): ``area-lecture`` -> Lecture,
+    ``area-notebook`` -> Notebook, ``area-sample`` -> Samples,
+    ``area-standard`` -> Standard, ``area-infra`` -> Infra,
+    ``area-cicd``/``area-image`` -> Tooling; priority order lecture ->
+    notebook -> sample -> standard -> infra -> tooling when a repo
+    carries several. Repos with no in-scope ``area-*`` topic fall back
+    to the v3 prefix rule (``lecture-``/``notebook-``/``sample-`` +
+    FORCED_SAMPLES names). Archived repos, repos carrying the
+    ``status-legacy`` topic and names matching neither layer are
+    excluded entirely,
   * card content (v8 ratified card anatomy): the card is a flex column
     whose footer is pinned to the bottom (``mt-auto``) above a hairline
     ``border-top``, so footers align across the grid. HEADER: the human
@@ -50,7 +57,10 @@ self-contained static card grid of the teaching surface under ``./public/``:
     generation) chips - zero noise otherwise. The pastel category tint
     (``CATEGORY_TINT``) and every v7 sort/filter data attribute
     (``data-title``/``data-ts``/``data-catrank``/``data-formation``/
-    ``data-filiere``/``data-sortkey``) are unchanged.
+    ``data-filiere``/``data-sortkey``) are unchanged, except (v8.6)
+    ``data-ts`` now carries the DISPLAYED content date (``dates.latest``,
+    fallback ``pushed_at``) so the date sorts agree with the visible
+    date column instead of the raw ``pushed_at``.
   * filters: sticky slim header with live search; filter panel collapsed
     behind a "Filtres" toggle below lg, inline from lg up; category
     segmented control (aria-pressed), a "Thèmes…" select (options sorted
@@ -91,7 +101,14 @@ date degrades to the repo pushed_at with a WARN (see _render_card). The
 per tagged repo (deduped by repo) against the publish host - the host
 catch-all answers HTTP 200 for every path, so liveness keys on the body
 signature (> 24 KB or a Quarto generator marker), never on the status
-code; any probe failure means "not live" (see _releases_live).
+code; any probe failure means "not live" (see _releases_live). The
+``develop/`` family IS probed the same way at build time (v8.6,
+``probe_sites``): one plain GET per repo that HAS a develop branch
+(same signature logic, ThreadPool(8), any failure = dead, never a
+crash); a dead develop demotes the card's ``Latest`` button to the
+honest disabled placeholder (tooltip "non publie"), greys the
+description line and re-points the primary URL to GitHub, so the
+catalog never hands out a catch-all fake-200 page.
 
 Styling is a purged Tailwind v3 stylesheet built AT CI BUILD TIME from
 ``inputs.css`` + ``tailwind.config.js`` (content = this file) into
@@ -171,25 +188,49 @@ USER_AGENT = "ebpro-teaching-catalog"
 # releases/ family is liveness-probed at build time (see _releases_live).
 SITE_BASE = "https://bruno.univ-tln.fr/teaching-material"
 
-# --- teaching surface (name-prefix classification, user spec v3) -----------
+# --- teaching surface (topic classification, user spec v8.6) ---------------
 
-# Display surface: THREE categories, assigned by repo NAME PREFIX (v3:
-# independent of topic labelling, so topic alignment work elsewhere cannot
-# shift the surface):
-#   lecture  : name starts with "lecture-"
-#   notebook : name starts with "notebook-"
-#   sample   : name starts with "sample-" + FORCED_SAMPLES
-# Excluded: archived repos, anything carrying the ``status-legacy`` topic,
-# and every name matching none of the prefixes above.
-CATEGORIES = ("lecture", "notebook", "sample")
+# Display surface: SIX categories, assigned by GitHub ``area-*`` TOPIC
+# (v8.6, replacing the v3 name-prefix rule so the surface follows the
+# org labelling that Phase 0 established, not repo names):
+#   lecture  : area-lecture   (course assemblies + lecture support repos)
+#   notebook : area-notebook  (standalone teaching modules)
+#   sample   : area-sample    (runtime examples / demo apps)
+#   standard : area-standard  (reference-era JEE-era samples, frozen canon)
+#   infra    : area-infra     (teaching infrastructure bricks)
+#   tooling  : area-cicd / area-image (CI + container tooling family)
+# Priority order below resolves multi-topic repos deterministically (e.g.
+# HelloGit carries area-lecture + area-sample -> lecture support).
+# Fallback (no in-scope area-* topic): the v3 name-prefix rule
+# (lecture-/notebook-/sample- + FORCED_SAMPLES names).
+# Excluded: archived repos and anything carrying the ``status-legacy``
+# topic (both layers).
+AREA_TO_CATEGORY = (
+    ("area-lecture", "lecture"),
+    ("area-notebook", "notebook"),
+    ("area-sample", "sample"),
+    ("area-standard", "standard"),
+    ("area-infra", "infra"),
+    ("area-cicd", "tooling"),
+    ("area-image", "tooling"),
+)
+IN_SCOPE_AREA_TOPICS = frozenset(t for t, _ in AREA_TO_CATEGORY)
 
-# Repos taught as samples regardless of their name prefix (user decision).
+CATEGORIES = ("lecture", "notebook", "sample", "standard", "infra", "tooling")
+
+# Repos taught as samples in the PREFIX-FALLBACK layer only (kept for
+# repos with no in-scope area-* topic; topic-labelled repos classify
+# through AREA_TO_CATEGORY instead - HelloGit/ConflictBot are
+# area-lecture on the org and land in ``lecture`` from v8.6 on).
 FORCED_SAMPLES = ("hellogit", "conflictbot", "fullstack-minimal-app")
 
 CATEGORY_LABELS = {
     "lecture": "Lecture",
     "notebook": "Notebook",
     "sample": "Samples",
+    "standard": "Standard",
+    "infra": "Infra",
+    "tooling": "Tooling",
 }
 
 # Status chips (v5): sober colour-coded pastilles, dark text on a light
@@ -268,6 +309,9 @@ CATEGORY_RANK = {
     "personal": 9,
     "student": 10,
     "none": 11,
+    # v8.6 rendering category: the cicd/image family shares the old
+    # cicd rank (6) - ranks need not be unique, they only order.
+    "tooling": 6,
 }
 
 # Pastel card tints per category (spec v6.2 item 7). PURGE-SAFE BY
@@ -287,6 +331,8 @@ CATEGORY_TINT = {
     "personal": "bg-rose-50 border-rose-200",
     "student": "bg-fuchsia-50 border-fuchsia-200",
     "none": "bg-white border-slate-200",
+    # v8.6 tooling family takes the cicd teal (same literal, purge-safe).
+    "tooling": "bg-teal-50 border-teal-200",
 }
 
 # Category label chip colours (meta row), same literal-class rule:
@@ -307,6 +353,8 @@ CATEGORY_CHIP = {
     "personal": "text-rose-800 bg-rose-100 border-rose-200",
     "student": "text-fuchsia-800 bg-fuchsia-100 border-fuchsia-200",
     "none": "text-slate-800 bg-slate-100 border-slate-200",
+    # v8.6 tooling family chip = the cicd teal chip (same literal).
+    "tooling": "text-teal-800 bg-teal-100 border-teal-200",
 }
 
 
@@ -752,24 +800,68 @@ def probe_releases(cards, workers=8):
     return len(candidates), len(live)
 
 
+# --- develop/ liveness probe (v8.6) -----------------------------------------
+
+
+def probe_sites(cards, workers=8):
+    """Set ``c["site_live"]`` for every card (one probe per develop repo).
+
+    A card's Latest affordance targets ``<repo>/develop/index.html``;
+    the publish host catch-all answers 200 with the fallback page for
+    unpublished repos, so liveness is the SAME body signature as the
+    releases probe (``_releases_live``, never the status code). Only
+    cards that HAVE a develop branch (``dates["latest_ref"]``) are
+    probed; every other card gets False with no call. Any probe failure
+    (timeout, HTTP error, DNS) is "dead", never a crash. ThreadPool(8),
+    plain public GETs (no auth, no GitHub pacing); ~70 candidates stay
+    far under the 3-minute build budget. Returns ``(candidates, live)``
+    for the build log.
+    """
+    candidates = {
+        c["name"]: "%s/%s/develop/index.html" % (SITE_BASE, c["name"])
+        for c in cards
+        if (c.get("dates") or {}).get("latest_ref")
+    }
+    live = set()
+    if candidates:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for name, ok in zip(candidates, pool.map(
+                    _releases_live, candidates.values())):
+                if ok:
+                    live.add(name)
+    for c in cards:
+        c["site_live"] = c["name"] in live
+    return len(candidates), len(live)
+
+
 # --- classification helpers --------------------------------------------------
 
 
 def _classify(repo):
     """Return the display category key for ``repo``, or None to exclude it.
 
-    Rules (user spec v3, evaluated in this order):
+    Rules (user spec v8.6, evaluated in this order):
       archived -> excluded;
       ``status-legacy`` topic -> excluded;
-      FORCED_SAMPLES name -> ``sample``;
-      name prefix ``lecture-`` / ``notebook-`` / ``sample-`` -> that category;
+      an in-scope ``area-*`` topic -> its category (AREA_TO_CATEGORY
+      priority order resolves multi-topic repos: lecture > notebook >
+      sample > standard > infra > tooling);
+      NO in-scope area topic -> the v3 prefix fallback: FORCED_SAMPLES
+      name -> ``sample``, name prefix ``lecture-`` / ``notebook-`` /
+      ``sample-`` -> that category;
       anything else -> excluded.
     """
     if repo.get("archived"):
         return None
-    name = (repo.get("name") or "").lower()
-    if "status-legacy" in (repo.get("topics") or []):
+    topics = repo.get("topics") or []
+    if "status-legacy" in topics:
         return None
+    topic_set = set(topics)
+    if topic_set & IN_SCOPE_AREA_TOPICS:
+        for area, cat in AREA_TO_CATEGORY:
+            if area in topic_set:
+                return cat
+    name = (repo.get("name") or "").lower()
     if name in FORCED_SAMPLES:
         return "sample"
     if name.startswith("lecture-"):
@@ -962,7 +1054,6 @@ def _render_card(c, generated_at):
     esc_topics = html.escape(" ".join(card_topics), quote=True)
     esc_search = html.escape(
         (c["name"] + " " + (c["description"] or "")).lower(), quote=True)
-    esc_ts = html.escape(c["pushed_at"] or "", quote=True)
     esc_formation = html.escape(c.get("formation", ""), quote=True)
     esc_filiere = html.escape(c.get("filiere", ""), quote=True)
     esc_sortkey = html.escape(_default_sortkey(c), quote=True)
@@ -979,6 +1070,17 @@ def _render_card(c, generated_at):
     latest_ref = dates.get("latest_ref")
     latest_iso = latest_raw or c["pushed_at"]
     stable_iso = stable_raw or c["pushed_at"]
+    # v8.6 (C-01): data-ts = the DISPLAYED content date (dates.latest,
+    # fallback pushed_at) - identical to the value _date_span renders -
+    # so the JS "Date recente/ancienne" sorts (lexicographic over this
+    # ISO) agree with the visible date column. pushed_at stays in the
+    # card/manifest data for the sort's own fallback only.
+    esc_ts = html.escape(latest_iso or "", quote=True)
+    # v8.6 (C-02): build-time probe verdict for <repo>/develop/index.html
+    # (see probe_sites). Only meaningful when the repo HAS a develop
+    # branch; a missing key (root pages built from a bare card dict)
+    # degrades to "not live", the honest direction.
+    site_live = bool(c.get("site_live"))
     parts = [
         '<article data-area="%s" data-topics="%s" data-search="%s" '
         'data-title="%s" data-ts="%s" data-catrank="%d" '
@@ -994,12 +1096,16 @@ def _render_card(c, generated_at):
     # --- HEADER: h2 title + description line (v8.3); primary URL gate --
     # v8.2 real deploy-URL families: releases/<tag>/ (only when the
     # probe confirmed the render live) > develop/ (only when the repo
-    # HAS a develop branch) > the GitHub page. "stable/" never exists.
+    # HAS a develop branch AND the v8.6 probe confirmed its render
+    # live) > the GitHub page. "stable/" never exists. A dead develop
+    # demotes the primary URL exactly like a dead releases/ render:
+    # the catalog never hands out the host's catch-all fake-200 page.
     releases_live = bool(c.get("releases_live"))
+    develop_live = bool(latest_ref) and site_live
     if c["latest_vtag"] and releases_live:
         primary_url = "%s/%s/releases/%s/" % (
             SITE_BASE, c["name"], c["latest_vtag"])
-    elif latest_ref:
+    elif develop_live:
         primary_url = "%s/%s/develop/" % (SITE_BASE, c["name"])
     else:
         primary_url = c["github_url"]
@@ -1019,11 +1125,18 @@ def _render_card(c, generated_at):
         'text-slate-900 hover:text-indigo-700 hover:underline">'
         '%s</a></h2>' % (title_href, esc_name))
     if esc_desc:
+        # v8.6 (C-02): when the card HAS a develop branch but the probe
+        # found the render dead, the description line is greyed
+        # (text-slate-500, an established literal - no new purge risk)
+        # so the card reads "non publie" at a glance; its href is
+        # primary_url, which has already fallen back to GitHub.
+        desc_cls = (meta_text if not latest_ref or site_live
+                    else "text-slate-500")
         parts.append(
             '<p class="mt-1 text-sm"><a href="%s" target="_blank" '
             'rel="noopener" class="block leading-snug %s line-clamp-1 '
             'hover:text-indigo-700 hover:underline">%s</a></p>'
-            % (primary_url, meta_text, esc_desc))
+            % (primary_url, desc_cls, esc_desc))
 
     # --- META ROW: taxonomy chips LEFT, content date RIGHT (fixed slot) --
     parts.append(
@@ -1112,13 +1225,22 @@ def _render_card(c, generated_at):
     # attributes, no load-time rewrite.
     if latest_ref:
         latest_abs = _abs_date_fr(latest_iso)
-        btns.append(
-            '<a class="btn" title="%s" href="%s/%s/develop/" '
-            'target="_blank" rel="noopener">Latest</a>'
-            % (html.escape("Latest · %s, contenu du %s"
-                           % (latest_ref, latest_abs or "date inconnue"),
-                           quote=True),
-               SITE_BASE, c["name"]))
+        if develop_live:
+            btns.append(
+                '<a class="btn" title="%s" href="%s/%s/develop/" '
+                'target="_blank" rel="noopener">Latest</a>'
+                % (html.escape("Latest · %s, contenu du %s"
+                               % (latest_ref, latest_abs or "date inconnue"),
+                               quote=True),
+                   SITE_BASE, c["name"]))
+        else:
+            # v8.6 (C-02): develop branch exists but the build-time probe
+            # found no live render at develop/index.html (catch-all fake-200
+            # family) - honest disabled placeholder, same grammar as the
+            # Stable one: grey, no href, never a fake-200 link.
+            btns.append(
+                '<button type="button" class="btn btn-disabled" disabled '
+                'title="non publie">Latest</button>')
     # Exactly one button -> full-width single column; both -> 1fr/1fr;
     # neither -> no action row at all (footer keeps the Branches
     # disclosure).
@@ -1365,7 +1487,7 @@ def _render_index(cards, generated_at):
   </header>
   <main class="mx-auto max-w-6xl px-4">
     <section class="py-6">
-      <p class="max-w-3xl text-base text-slate-600">Des cours complets (lecture), des modules indépendants (notebook) et des exemples (samples).</p>
+      <p class="max-w-3xl text-base text-slate-600">Des cours complets (lecture), des modules indépendants (notebook), des exemples (samples), des références de standard (standard), des briques d'infrastructure (infra) et des outils de chaîne (tooling).</p>
       <a class="lnk mt-3" href="mailto:emmanuel.bruno@univ-tln.fr">emmanuel.bruno@univ-tln.fr</a>
     </section>
     <nav aria-label="Filtres" id="filters" class="pb-2">
@@ -1590,8 +1712,10 @@ def _render_index(cards, generated_at):
 
     // Tri (spec v6 item 3) : réordonne TOUTES les cartes (visibles et
     // masquées) en déplaçant les <article> existants, puis rejoue les
-    // filtres. Clés = data-title (nom minuscule) / data-ts (ISO pushed_at,
-    // tri lexicographique = tri chronologique). Aucun : "value" vide =
+    // filtres. Clés = data-title (nom minuscule) / data-ts (v8.6 : ISO de
+    // la date de CONTENU affichée, dates.latest avec repli pushed_at —
+    // tri lexicographique = tri chronologique, en accord avec la colonne
+    // date visible). Aucun : "value" vide =
     // ordre de construction. Pas d'animation (préférence sobre + pas de
     // conflit prefers-reduced-motion).
     function applySort() {
@@ -1852,6 +1976,18 @@ def main():
     probed, live_n = probe_releases(cards)
     print("Releases probe: %d candidates, %d live in %.1fs" %
           (probed, live_n, time.time() - probe_started))
+
+    # v8.6 develop/ liveness gate (C-02): one plain public GET per repo
+    # that HAS a develop branch, same body-signature logic as the
+    # releases probe. A dead develop demotes the Latest button to the
+    # disabled placeholder, greys the description line and re-points the
+    # primary URL to GitHub; the verdict also lands in the manifest
+    # (``site_live``) for downstream consumers. Runs BEFORE the renders
+    # and the manifest write so both see the field on every card.
+    sites_started = time.time()
+    sited, site_live_n = probe_sites(cards)
+    print("Site probe (develop): %d candidates, %d live in %.1fs" %
+          (sited, site_live_n, time.time() - sites_started))
 
     # Deterministic default order (spec v6.2 item 6, refined v7 item 5):
     # full-taxonomy category rank, then the baked data-sortkey (lecture
