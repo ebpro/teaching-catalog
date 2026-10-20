@@ -106,7 +106,11 @@ under ``roots/<repo>/index.html`` (v8.4): the repo's own card (title,
 description, category/status pastilles, gated Stable/Latest/preview links)
 on a minimal standalone page, deployed by the workflow with a second,
 ``--delete``-free rsync so the rendered ``<branch>/`` directories beside it
-are never touched. The page links the shared stylesheet through the
+are never touched. ``roots/index.html`` (v8.5) is the ``teaching-material/``
+root redirect into ``catalog/`` and travels the SAME second rsync on purpose:
+scp creates the remote file under the HOST umask (0077 -> mode 600 -> Apache
+403) regardless of the local file's bits, while ``rsync -a`` (implies ``-p``)
+applies an explicit chmod to 644 on the receiver. The page links the shared stylesheet through the
 deployed sibling path ``../catalog/app.css?v=…``; every class literal is
 reused verbatim from the index templates (the purge scans this file alone,
 so reusing existing literals needs no CSS rebuild semantics change).
@@ -152,6 +156,10 @@ OUT_DIR = "public"
 # ``roots/<repo>/index.html``, rsynced ADDITIVELY (no --delete) to
 # ``teaching-material/<repo>/`` by the catalog workflow. Deployed outside
 # catalog/, hence the ``../catalog/`` relative asset links in the page.
+# v8.5: ``roots/index.html`` (the teaching-material root redirect,
+# -> ``teaching-material/index.html``) is emitted into this dir too, so it
+# shares the mode-preserving rsync transport instead of the umask-crushed
+# scp path (see module docstring).
 ROOTS_DIR = "roots"
 USER_AGENT = "ebpro-teaching-catalog"
 
@@ -1198,6 +1206,25 @@ def _render_root_page(c, generated_at):
     )
 
 
+def _render_root_redirect():
+    """Return the ``teaching-material/`` root redirect page.
+
+    Emitted to ``roots/index.html`` and delivered by the workflow's second
+    rsync to ``teaching-material/index.html`` (v8.5). Body is byte-equal to
+    the v8.4 heredoc (meta refresh + relative canonical into ``catalog/``);
+    only the TRANSPORT changed: v8.4 scp'd a chmod-644 temp file and the
+    host still served 403 because OpenSSH scp creates the destination under
+    the remote umask (0077 here) without an explicit post-transfer chmod,
+    landing mode 600. ``rsync -a`` implies ``-p`` (receiver-side chmod to
+    the source mode), which is why the 74 root cards served fine all along.
+    """
+    return ('<!doctype html><html lang="fr"><head><meta charset="utf-8">'
+            '<meta http-equiv="refresh" content="0;url=catalog/">'
+            '<link rel="canonical" href="catalog/"><title>ebpro</title>'
+            '</head><body><p><a href="catalog/">Catalog ebpro</a></p>'
+            '</body></html>\n')
+
+
 def _render_index(cards, generated_at):
     """Return the full index.html source (v6: purged local app.css, no CDN).
 
@@ -1849,6 +1876,13 @@ def main():
             "repos": cards,
         }, f, indent=2, ensure_ascii=False)
         f.write("\n")
+
+    # v8.5 root redirect index: roots/index.html -> teaching-material/
+    # index.html via the same additive rsync as the cards (mode-preserving;
+    # scp would land 600 under the host umask, see _render_root_redirect).
+    os.makedirs(ROOTS_DIR, exist_ok=True)
+    _write_file(os.path.join(ROOTS_DIR, "index.html"),
+                _render_root_redirect())
 
     # v8.4 per-repo root card pages: roots/<repo>/index.html (deployed
     # additively over the teaching-material roots, see catalog.yml).

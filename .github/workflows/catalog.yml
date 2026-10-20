@@ -37,8 +37,9 @@ jobs:
           name: catalog-site
           # Two top-level dirs land in the artifact (shared parent =
           # workspace): public/ (the catalog site) and roots/ (per-repo
-          # root card pages, v8.4). The deploy job downloads both to the
-          # workspace root and rsyncs them to different destinations.
+          # root card pages + the teaching-material root redirect index,
+          # v8.5). The deploy job downloads both to the workspace root and
+          # rsyncs them to different destinations.
           path: |
             public/
             roots/
@@ -96,31 +97,46 @@ jobs:
           rsync -az --delete --mkpath -e "ssh $SSH_OPTS" \
             ./public/ "${REMOTE}:teaching-material/catalog/"
 
-          # --- per-repo root card pages (v8.4): ADDITIVE sync, no --delete.
-          #     Each roots/<repo>/index.html lands on teaching-material/<repo>/;
-          #     the rendered <branch>/ directories beside it are never touched.
+          # --- per-repo root card pages (v8.4) + root redirect (v8.5):
+          #     ADDITIVE sync, no --delete. Each roots/<repo>/index.html
+          #     lands on teaching-material/<repo>/; roots/index.html lands
+          #     on teaching-material/index.html (the root redirect into
+          #     catalog/). The rendered <branch>/ directories beside them
+          #     are never touched.
           #     Note-and-accept: deploy-static still rewrites a plain
           #     placeholder over a repo root until the next catalog build
           #     (self-heals via trigger-catalog). ---
           if [ -d ./roots ]; then
             rsync -az --mkpath -e "ssh $SSH_OPTS" \
               ./roots/ "${REMOTE}:teaching-material/"
-            echo "✅ root card pages synchronisés ($(find ./roots -name index.html | wc -l | tr -d ' ') fichiers)"
+            echo "✅ root card pages synchronisés ($(find ./roots -mindepth 2 -name index.html | wc -l | tr -d ' ') fichiers)"
           else
             echo "::notice::./roots absent — root card sync ignoré (artifact public/ uniquement)"
           fi
 
-          # --- drop root redirect index (single file, no --delete at root) ---
-          # mktemp creates mode 600 and scp preserves bits: without the
-          # chmod the host serves the file with a 403 (Apache denies
-          # world-unreadable files). chmod 644 BEFORE scp.
-          INDEX_TMP="$(mktemp)"
-          cat > "$INDEX_TMP" <<'EOF'
-          <!doctype html><html lang="fr"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=catalog/"><link rel="canonical" href="catalog/"><title>ebpro</title></head><body><p><a href="catalog/">Catalog ebpro</a></p></body></html>
-          EOF
-          chmod 644 "$INDEX_TMP"
-          scp -i "$KEY_FILE" -o StrictHostKeyChecking=accept-new \
-            "$INDEX_TMP" "${REMOTE}:teaching-material/index.html"
-          rm -f "$INDEX_TMP"
+          # --- post-upload verification (v8.5, permanent guard) ---------
+          # The root redirect used to travel by scp. scp is NOT mode-safe
+          # here: OpenSSH creates the destination under the HOST umask
+          # (0077 for this user) and only chmods post-transfer with -p, so
+          # even a chmod-644 local source landed mode 600 -> Apache 403
+          # (the v8.4 pre-scp chmod fixed the wrong side). rsync -a implies
+          # -p (explicit receiver-side chmod), so the file now rides the
+          # roots/ rsync above. This gate stats the landed files on the
+          # host and HARD-FAILS the deploy if the root index is missing or
+          # not world-readable, so the 600/403 class can never regress
+          # silently again.
+          VERIFY="$(ssh $SSH_OPTS "$REMOTE" \
+            'for f in teaching-material/index.html teaching-material/catalog/index.html; do stat -c "%n %a" "$f" 2>/dev/null || echo "$f MISSING"; done')" || VERIFY=""
+          echo "Post-upload verification (host-side stat):"
+          echo "$VERIFY"
+          ROOT_MODE="$(printf '%s\n' "$VERIFY" | awk '$1=="teaching-material/index.html"{print $2}')"
+          if [ -z "$ROOT_MODE" ] || [ "$ROOT_MODE" = "MISSING" ]; then
+            echo "::error::teaching-material/index.html absent on host after deploy (verification failed)"
+            exit 1
+          fi
+          if [ $((8#$ROOT_MODE & 8#4)) -eq 0 ]; then
+            echo "::error::teaching-material/index.html mode $ROOT_MODE is NOT world-readable (Apache 403 class)"
+            exit 1
+          fi
 
-          echo "✅ catalog déployé vers bruno@vai.univ-tln.fr:teaching-material/catalog/"
+          echo "✅ catalog déployé vers bruno@vai.univ-tln.fr:teaching-material/ (catalog/ + racines + redirect, mode $ROOT_MODE)"
