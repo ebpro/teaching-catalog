@@ -97,6 +97,29 @@ Fait date autorise ici uniquement ; la clause 5 de TEACHING-FLEET.md s'arrete a 
   (sauter le projet `teaching-catalog`, ne jamais toucher la `production_branch`, repli `develop`).
 - Le depot ecrit un artefact d'Actions (`Upload catalog site artifact`) que le job de deploiement telecharge : il contribue donc au compteur de stockage de l'organisation. Le chiffre du compteur est un fait de flotte, pas un fait de ce fichier.
 
+### Retrait de `cleanup.yml` (2026-11-07, execute en local, non pousse)
+
+- **Dans l'ordre enonce par le ruling.** `1f393634af1bec1c35a98c8797070bbf9802acd0` retire le bloc
+  `schedule:` du workflow : le seul risque operationnel etait une recurrence qui tourne, il est leve au
+  premier commit. `62978df3dd63a15e63035d48a6dd2e23fa1000e8` supprime le fichier
+  `.github/workflows/cleanup.yml`, retire la puce du `README.md` qui presentait le menage comme actif,
+  et corrige les deux commentaires de `catalog.py` qui nommaient le fichier detruit.
+- **Solde par le present append**, sans reecriture : l'entree de la section « Decisions humaines en
+  attente » qui proposait les deux issues (a) suppression et (b) reparation est close par (a). C'est cet
+  append qui fait foi, pas l'entree qu'il solde.
+- **Ce qui reste en place, volontairement.** La sous-commande `cleanup` de `catalog.py` (la fonction
+  `cmd_cleanup` et sa couche API Cloudflare) n'est pas supprimee : elle devient un CLI de maintenance
+  manuel, et ses commentaires le disent desormais. Sa suppression complete est une decision distincte,
+  non prise. Les secrets d'organisation `CF_API_TOKEN` et `CF_ACCOUNT_ID` restent en place : leur
+  suppression est une action individuelle separee, non demandee.
+- **Ce qui est prouve, et ce qui ne l'est pas.** Le retrait est prouve dans l'arbre de travail : zero
+  occurrence de `cleanup.yml` hors la presente zone ledger, `python3 -m py_compile catalog.py` correct,
+  et le workflow restant `catalog.yml` non touche. Ce qui n'est pas prouve : tout effet en ligne, aucun
+  de ces commits n'etant pousse.
+- **Condition de poussee.** Pousser `main` reconstruit et **repose le catalogue en ligne** : le job
+  `deploy` de `catalog.yml` n'a aucune condition d'evenement. Le go-ahead doit nommer cette consequence
+  (ADR-04).
+
 ### Missions ouvertes
 
 - Audit `cleanup.yml` : **instruit le 2026-11-07** (resultat ci-dessus, section Etat). Ce qui reste : la
