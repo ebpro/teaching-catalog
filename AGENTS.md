@@ -86,7 +86,7 @@ Fait date autorise ici uniquement ; la clause 5 de TEACHING-FLEET.md s'arrete a 
   C'est un **faux vert depuis son premier jour** (fichier ajoute par `5af9ded`, 2026-10-06). Le chemin
   `schedule` est destructif par defaut (`Mode: LIVE`, `Retention: keep last 3 per branch`, lu dans les
   logs des runs `38110526401` et `41271575960`), mais l'appel `GET /accounts/<id>/pages/projects?per_page=50`
-  echoue en HTTP 400, code CF `8000024`, messageverbatim « Invalid list options provided. Review the
+  echoue en HTTP 400, code CF `8000024`, message litteral « Invalid list options provided. Review the
   `page` or `per_page` parameter. ». La couche API de `catalog.py` est concue « never raises » : le 400
   est avale, le menu rend `Found 0 Pages projects`, `Summary: 0 kept, 0 deleted`, code de sortie 0. Les
   secrets `CF_API_TOKEN` et `CF_ACCOUNT_ID` existent au niveau organisation (repo : aucun) et sont bien
