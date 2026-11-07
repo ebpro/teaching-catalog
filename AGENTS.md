@@ -81,19 +81,44 @@ Fait date autorise ici uniquement ; la clause 5 de TEACHING-FLEET.md s'arrete a 
 - Parite avec la distante verifiee : HEAD local `ad51769131d722c35388245d4a627ad6915a8efb` == `git ls-remote origin refs/heads/main`.
 - Contenu de la racine, mesure : `catalog.py` (2208 lignes), `inputs.css`, `tailwind.config.js`, `README.md`, `.gitignore`, `.github/workflows/catalog.yml` (142 lignes), `.github/workflows/cleanup.yml` (47 lignes).
 - `catalog.yml` : le job `build` tourne sur l'executeur heberge, le job `deploy` sur le pool auto-helberge de l'organisation (`needs: build`, **sans `if:`**), et depose par rsync vers `teaching-material/` avec un `--delete` borne a `catalog/`.
-- `cleanup.yml` : `CF Pages Cleanup`, tache periodique hebdomadaire. Heritage d'une plateforme de publication precedente ; son effet reel sur l'etat actuel n'est **pas verifie** par cette session.
+- `cleanup.yml` : `CF Pages Cleanup`, tache periodique hebdomadaire. **Corrige par l'audit du 2026-11-07** :
+  la premiere version de ce registre la qualifiait d'heritage a effet inconnu ; c'etait trop favorable.
+  C'est un **faux vert depuis son premier jour** (fichier ajoute par `5af9ded`, 2026-10-06). Le chemin
+  `schedule` est destructif par defaut (`Mode: LIVE`, `Retention: keep last 3 per branch`, lu dans les
+  logs des runs `38110526401` et `41271575960`), mais l'appel `GET /accounts/<id>/pages/projects?per_page=50`
+  echoue en HTTP 400, code CF `8000024`, messageverbatim « Invalid list options provided. Review the
+  `page` or `per_page` parameter. ». La couche API de `catalog.py` est concue « never raises » : le 400
+  est avale, le menu rend `Found 0 Pages projects`, `Summary: 0 kept, 0 deleted`, code de sortie 0. Les
+  secrets `CF_API_TOKEN` et `CF_ACCOUNT_ID` existent au niveau organisation (repo : aucun) et sont bien
+  livres (depot public). Second defaut latent, independant du premier : la boucle lit `result_info.has_more`
+  et `.cursor`, alors que cette endpoint est paginee par `page`/`total_pages` dans la documentation
+  officielle ; meme corrige sur le 400, elle s'arreterait apres la page une. Rayon d'action si c'etait
+  repare sans rien d'autre : **tout le compte Cloudflare**, les seules protections etant dans le code
+  (sauter le projet `teaching-catalog`, ne jamais toucher la `production_branch`, repli `develop`).
 - Le depot ecrit un artefact d'Actions (`Upload catalog site artifact`) que le job de deploiement telecharge : il contribue donc au compteur de stockage de l'organisation. Le chiffre du compteur est un fait de flotte, pas un fait de ce fichier.
 
 ### Missions ouvertes
 
-- Instruire `cleanup.yml` : savoir si ce menage cible encore quelque chose de reel, ou s'il est l'heritage d'une plateforme abandonnee. Decision d'owner.
+- Audit `cleanup.yml` : **instruit le 2026-11-07** (resultat ci-dessus, section Etat). Ce qui reste : la
+  disposition, non l'instruction. Le depot ne publie plus rien sur Cloudflare (aucune voie de publication
+  CF dans `catalog.yml` ni ailleurs) ; rien ne cree donc de previews a menager. Le texte du `README.md`
+  (paragraphe « The `cleanup` subcommand ») presente toujours le menage comme actif : c'est faux, sa
+  retouche appartient a l'owner.
 - La vague d'extension du registre emis (ADR-18) vers les depots qui n'ont pas encore de ledger est planifiee par le journal de corpus ; le present depot entre dans la liste declaree par ce meme commit.
 - Relecture du contenu editorial de la table ADR par un second regard : la porte de derive prouve la forme, jamais le sens.
 
 ### Decisions humaines en attente
 
 - Poussee du present commit : **elle republierait le catalogue en ligne**, le job de deploiement n'etant conditionne par aucun type d'evenement. Le go-ahead doit nommer cette consequence (ADR-04).
-- Disposition de `cleanup.yml` si son heritage est confirme.
+- Disposition de `cleanup.yml`, decision d'owner, deux issues EQUIVOLENTES en cout mais pas en effet :
+  (a) supprimer le workflow et la sous-commande `cleanup` de `catalog.py`, plus la phrase du README ;
+  (b) le reparer si la capacite doit rester : inverser le defaut du cron en dry-run, corriger la
+  pagination en mode `page`, rendre le 400 **bruyant** (`::error::` et code de sortie non nul), borner
+  par allowlist explicite de projets, et valider d'abord par `workflow_dispatch` avec `dry_run=true`.
+  La suppression est une action destructive : confirmation humaine individuelle (permettant ADR-04).
+- Poussee de `main` : go-ahead humain individuel (ADR-04) qui doit nommer la mesure de la zone mince :
+  le job `deploy` de `catalog.yml` n'a **aucune condition d'evenement**, donc meme un commit de
+  documentation reconstruit et **repose le catalogue en ligne** (rsync `--delete` borne a `catalog/`).
 
 ### Non negociables propres au depot
 
