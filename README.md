@@ -52,9 +52,6 @@ dates render as absolute short French dates at build time, rewritten to
   `trigger-catalog` job, which dispatches a `catalog.yml` rebuild of this
   repo on `main` (needs `CATALOG_DISPATCH_TOKEN` with Actions:write here;
   warn-only — the 6 h cron is the fallback).
-- The `cleanup` subcommand (`python catalog.py cleanup [--dry-run] [--keep N]`)
-  prunes old Cloudflare Pages preview deployments (needs `CF_API_TOKEN`) and
-  is driven by `.github/workflows/cleanup.yml` (weekly, Sunday 04:00 UTC).
 - To change which repos are listed, adjust the category rules
   (`CATEGORIES` / `FORCED_SAMPLES` / `_classify`) at the top of `catalog.py`.
   Category assignment is by name prefix on purpose (robust to topic-labelling

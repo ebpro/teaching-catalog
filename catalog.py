@@ -133,8 +133,9 @@ reused verbatim from the index templates (the purge scans this file alone,
 so reusing existing literals needs no CSS rebuild semantics change).
 
 Pure Python 3 stdlib. Auth: reads ``GITHUB_TOKEN`` (required) from the
-environment. The ``cleanup`` subcommand (Cloudflare Pages preview pruning,
-kept for ``.github/workflows/cleanup.yml``) additionally reads
+environment. The ``cleanup`` subcommand (Cloudflare Pages preview pruning)
+is a manual maintenance CLI: the weekly workflow that drove it was removed
+once Cloudflare stopped being used by this project. It additionally reads
 ``CF_API_TOKEN`` and is unaffected by the catalog rendering path above.
 """
 
@@ -501,11 +502,11 @@ def _request(url, attempts=_MAX_ATTEMPTS):
 
 # --- Cloudflare Pages API layer (cleanup subcommand only; never raises) ---
 #
-# Reached only through ``catalog.py cleanup``
-# (.github/workflows/cleanup.yml), and only when CF_API_TOKEN is set;
+# Reached only through a manual
+# ``catalog.py cleanup`` invocation, and only when CF_API_TOKEN is set;
 # the catalog rendering path never touches CF. Locally the token is
 # empty and no CF calls are made. Every CF failure is swallowed so a
-# Cloudflare problem can never break the (GitHub-backed) cleanup run.
+# Cloudflare problem can never break the cleanup run.
 
 CF_TOKEN = ""
 CF_API = "https://api.cloudflare.com/client/v4"
