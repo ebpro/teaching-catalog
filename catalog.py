@@ -98,10 +98,10 @@ the repo has that branch - v8.1), stable tag, at most 12
 disclosed branches; ThreadPool(8), global 5 calls/s pacing); a failed
 date degrades to the repo pushed_at with a WARN (see _render_card). The
 ``releases/`` site family IS probed at build time (v8.2): one plain GET
-per tagged repo (deduped by repo) against the publish host - the host
-catch-all answers HTTP 200 for every path, so liveness keys on the body
-signature (> 24 KB or a Quarto generator marker), never on the status
-code; any probe failure means "not live" (see _releases_live). The
+per tagged repo (deduped by repo) against the publish host - a 200 alone
+is not proof of a genuine render, so liveness keys on the body signature
+(HTTP 200 AND the Quarto generator marker), never on the status code
+alone; any probe failure means "not live" (see _releases_live). The
 ``develop/`` family IS probed the same way at build time (v8.6,
 ``probe_sites``): one plain GET per repo that HAS a develop branch
 (same signature logic, ThreadPool(8), any failure = dead, never a
@@ -747,33 +747,36 @@ def fetch_extras(entries, workers=8):
 
 # --- releases/ liveness probe (v8.2) ----------------------------------------
 
-# The publish host answers HTTP 200 with a ~23 KB fallback page for ANY
-# path (DokuWiki catch-all), so a 200 is never evidence of a published
-# render. Live signature: body larger than this byte floor OR carrying
-# the Quarto generator marker (genuine rendered pages always do, the
-# fallback page never does).
-RELEASES_LIVE_MIN_BYTES = 24576
+# Live signature: the body must carry the Quarto generator marker
+# (``<meta name="generator" content="quarto-...">``), which genuine
+# rendered pages always emit. Liveness is HTTP 200 AND that marker; a 200
+# without it (or any non-200) is "not live". The historical DokuWiki
+# catch-all that answered 200 with a ~23 KB fallback page for ANY path -
+# which had motivated a raw byte floor as a second, size-based criterion -
+# is gone (absent teaching-material paths now answer a bare Apache 404,
+# since 2026-11-02), so no size threshold remains in the decision.
 RELEASES_LIVE_MARKER = b'content="quarto-'
+# Bounded head-prefix read for the probe - a READ bound, NOT a liveness
+# threshold: the generator meta tag sits in the document head, so a
+# 32 KiB prefix always contains it and we never download the full body.
+LIVE_PROBE_PREFIX_BYTES = 32768
 
 
 def _releases_live(url):
-    """True when ``url`` serves a genuine rendered site (not the catch-all).
+    """True when ``url`` serves a genuine rendered site.
 
     One plain public HTTP GET (no auth, no GitHub pacing): live iff the
-    body exceeds ``RELEASES_LIVE_MIN_BYTES`` or contains
-    ``RELEASES_LIVE_MARKER``. ANY failure (timeout, HTTP error, DNS,
-    unreadable) returns False - "not live" - and never raises, so the
-    probe can only ever demote a link to the honest disabled placeholder,
-    never break the build.
+    response is HTTP 200 AND its body contains ``RELEASES_LIVE_MARKER``.
+    ANY failure (non-200 status, timeout, DNS, unreadable) returns False -
+    "not live" - and never raises, so the probe can only ever demote a
+    link to the honest disabled placeholder, never break the build.
     """
     try:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=20) as resp:
-            body = resp.read(RELEASES_LIVE_MIN_BYTES + 4096)
+            body = resp.read(LIVE_PROBE_PREFIX_BYTES)
     except Exception:  # noqa: BLE001 - probe degrades to "not live"
         return False
-    if len(body) > RELEASES_LIVE_MIN_BYTES:
-        return True
     return RELEASES_LIVE_MARKER in body
 
 
@@ -808,9 +811,9 @@ def probe_sites(cards, workers=8):
     """Set ``c["site_live"]`` for every card (one probe per develop repo).
 
     A card's Latest affordance targets ``<repo>/develop/index.html``;
-    the publish host catch-all answers 200 with the fallback page for
-    unpublished repos, so liveness is the SAME body signature as the
-    releases probe (``_releases_live``, never the status code). Only
+    liveness is the SAME body signature as the releases probe
+    (``_releases_live``: HTTP 200 AND the Quarto generator marker, never
+    the status code alone). Only
     cards that HAVE a develop branch (``dates["latest_ref"]``) are
     probed; every other card gets False with no call. Any probe failure
     (timeout, HTTP error, DNS) is "dead", never a crash. ThreadPool(8),
@@ -1970,9 +1973,10 @@ def main():
           (len(cards), time.time() - extras_started))
 
     # v8.2 releases/ liveness gate: one plain public GET per tagged repo
-    # (deduped), keyed on the body signature - never the 200 status (the
-    # host catch-all). Dead/unknown probes demote the Stable link to the
-    # honest placeholder and the primary URL to develop/GitHub.
+    # (deduped), keyed on the body signature - HTTP 200 AND the Quarto
+    # generator marker (a 200 without the marker is not live). Dead/unknown
+    # probes demote the Stable link to the honest placeholder and the primary
+    # URL to develop/GitHub.
     probe_started = time.time()
     probed, live_n = probe_releases(cards)
     print("Releases probe: %d candidates, %d live in %.1fs" %
